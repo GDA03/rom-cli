@@ -1018,15 +1018,50 @@ def show(results, limit=15):
 
 
 def select_menu(results, limit=15):
-    import select as _select
-    import termios
-    import tty
     items = results[:limit]
-    fd = sys.stdin.fileno()
-    old = termios.tcgetattr(fd)
+    if os.name == "nt":
+        import msvcrt
+        os.system("")  # ponytail: turns on ANSI escape handling in the Windows console
+
+        def key():
+            ch = msvcrt.getwch()
+            if ch in ("\x00", "\xe0"):  # arrow keys arrive as a prefix + scan code
+                return {"H": "up", "P": "down"}.get(msvcrt.getwch(), "")
+            return ch
+
+        def restore():
+            pass
+    else:
+        import select as _select
+        import termios
+        import tty
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+        tty.setcbreak(fd)
+
+        def key():
+            ch = os.read(fd, 1).decode("utf-8", "replace")
+            if ch != "\x1b":
+                return ch
+            seq = b""
+            stop = time.time() + 0.4
+            while time.time() < stop:
+                if _select.select([fd], [], [], 0.05)[0]:
+                    try:
+                        seq += os.read(fd, 64)
+                    except OSError:
+                        break
+                    if seq.endswith((b"A", b"B")):
+                        break
+                elif seq:
+                    break
+            return "up" if seq.endswith(b"A") else "down" if seq.endswith(b"B") else ""
+
+        def restore():
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
     idx, chosen, n_lines = 0, set(), 0
     try:
-        tty.setcbreak(fd)
         sys.stdout.write("\033[?25l")
         while True:
             if n_lines:
@@ -1041,24 +1076,11 @@ def select_menu(results, limit=15):
             write("\033[J")
             write("\n".join(lines) + "\n")
             n_lines = len(lines)
-            ch = os.read(fd, 1).decode("utf-8", "replace")
-            if ch == "\x1b":
-                seq = b""
-                stop = time.time() + 0.4
-                while time.time() < stop:
-                    if _select.select([fd], [], [], 0.05)[0]:
-                        try:
-                            seq += os.read(fd, 64)
-                        except OSError:
-                            break
-                        if seq.endswith((b"A", b"B")):
-                            break
-                    elif seq:
-                        break
-                if seq.endswith(b"A"):
-                    idx = max(0, idx - 1)
-                elif seq.endswith(b"B"):
-                    idx = min(len(items) - 1, idx + 1)
+            ch = key()
+            if ch == "up":
+                idx = max(0, idx - 1)
+            elif ch == "down":
+                idx = min(len(items) - 1, idx + 1)
             elif ch in ("\r", "\n"):
                 return [items[i] for i in sorted(chosen)] or [items[idx]]
             elif ch == " ":
@@ -1071,7 +1093,7 @@ def select_menu(results, limit=15):
                     idx = num - 1
     finally:
         write("\033[?25h")
-        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        restore()
         write("\n")
 
 

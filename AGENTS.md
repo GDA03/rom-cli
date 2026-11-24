@@ -124,11 +124,9 @@ When scripting searches, always pass `--list` or `--print-url`.
 
 ## Runtime/Tooling Preferences
 - Python 3.8+ (`#!/usr/bin/env python3`). `textual` is the only dependency; it is unpinned and needed only for the TUI. There is no pyproject or requirements file.
-- **POSIX only**:
-  - `select_menu` uses `termios`/`tty`.
-  - The wrapper written by `install.sh` is hardcoded to `#!/bin/zsh`.
-  - The PATH hint in `install.sh` uses fish syntax.
-- On this Windows checkout, run the TUI and interactive menu under WSL or on macOS/Linux. On Windows, test with `--list` or `--print-url`.
+- **Platforms**:
+  - `select_menu` reads keys with `termios`/`tty` on POSIX and `msvcrt.getwch()` on Windows. On Windows, arrow keys arrive as a `\xe0`/`\x00` prefix followed by `H` (up) or `P` (down), and `os.system("")` enables ANSI escapes in the console.
+  - The wrapper written by `install.sh` is hardcoded to `#!/bin/zsh`, and its PATH hint uses fish syntax. On Windows, use the repo venv `.venv/` (gitignored) with a `rom.cmd` wrapper instead, as shown in the README.
 - The Windows checkout has CRLF line endings (no `.gitattributes`) and `core.filemode=false`. Under WSL/Git Bash the shebangs fail as `python3\r`, and commits must not introduce CRLF. Set the exec bit on new scripts with `git update-index --chmod=+x`.
 - Git remote: `origin` at `github.com/GDA03/rom-cli`, branch `main`. The README clone URL (`danisiber`) does not match.
 

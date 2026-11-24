@@ -12,7 +12,7 @@ a progress bar, and a folder organised by platform.
 ## Requirements
 
 - Python 3.8+
-- macOS or Linux
+- macOS, Linux or Windows
 - `textual` (`install.sh` installs it into its own venv)
 
 ## Installation
@@ -26,6 +26,17 @@ cd rom-cli
 This creates a venv in `~/.venvs/rom`, installs `textual`, and publishes `rom`
 (and `rom-remote`) into `~/bin`. Use `PREFIX=/usr/local ./install.sh` for a
 different destination.
+
+On Windows `install.sh` does not apply (it writes a zsh wrapper). Instead, create a
+venv in the clone and put a `rom.cmd` on your `PATH`:
+
+```bat
+python -m venv .venv
+.venv\Scripts\python -m pip install textual
+:: rom.cmd, e.g. in %USERPROFILE%\.local\bin
+@echo off
+"C:\path\to\rom-cli\.venv\Scripts\python.exe" "C:\path\to\rom-cli\bin\rom" %*
+```
 
 ## Usage
 
