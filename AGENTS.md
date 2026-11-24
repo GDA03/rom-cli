@@ -40,6 +40,12 @@ flowchart LR
   - `_fill()` rebuilds the columns on every render: Type and Size appear only when some shown row has a value.
   - `_cells()` shows `↓`/`↗` from each source's `direct` class attribute. For best-seller placeholders (`source == ""`) it looks at the platform's first provider.
   - ★ means `pop_rank()` matched the title exactly and the title has no `BAD` word. The same `meta["pop"]` drives the ranking boost in `rank()`.
+  - **Choices model**: a `Result` may carry `meta["choices"]`, a list of `{label, kind, url, filename, size, direct, default}`, and `meta["picked"]`, a list of indexes. `expand_choices()` turns it into one `Result` per file: the picked indexes, else the `default` ones, skipping `direct: False`. `download()` calls it and recurses, and `ArchiveOrg.resolve` uses `meta["url"]`.
+  - Switch groups come from `ArchiveOrg._group_result()`, keyed by `base_tid()` (`int(tid) & ~0x1FFF`, verified against the 35 complete groups in the index). Files without a Title ID stay single rows. Defaults: the `.nsp` base and the newest update, where newest means the highest `[vN]`.
+  - romsfun versions: `RomsFun.files(r)` caches the download-page rows in `meta["files"]`, `default_file()` picks USA/World non-hack, and `resolve()` honours `meta["picked"][0]`.
+  - Link-only extras: `RomsLab.extras` types its post buttons by text and `DlpsGame/NswGame.extras` type their links by URL (`link_kind`). They appear in the panel as text only.
+  - `merge_dupes()` (TUI only; `--list` stays one row per source) folds same `(norm(title), platform)` rows into the best-ranked one as `meta["alts"]`. A Title-ID group always joins as an alt, so its versions show up. `DetailScreen(vr=…)` lists versions from the first alt that has `choices` or romsfun `files`.
+  - Queue: `_batch()` expands each row into jobs, `QueueRow` widgets are mounted in `#queue`, and one worker thread `_drain()`s the jobs in order. Each job gets a `threading.Event` passed to `download(cancel=)` and then `stream(cancel=)`. Cancel raises `"cancelled"` and keeps the `.part` file.
 
 ## Key Directories
 - `bin/`: everything that ships.

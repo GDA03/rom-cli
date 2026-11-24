@@ -216,7 +216,7 @@ def request(url, data=None, headers=None, timeout=40, retries=3, method=None):
     raise last
 
 
-def stream(url, referer, on_progress, dest):
+def stream(url, referer, on_progress, dest, cancel=None):
     part = dest + ".part"
     pos = os.path.getsize(part) if os.path.exists(part) else 0
     req = urllib.request.Request(url)
@@ -234,6 +234,8 @@ def stream(url, referer, on_progress, dest):
         on_progress(read, total)
         with open(part, "ab" if resumed else "wb") as f:
             while True:
+                if cancel is not None and cancel.is_set():
+                    raise RuntimeError("cancelled")  # .part stays for resume
                 chunk = r.read(1048576)
                 if not chunk:
                     break
@@ -250,6 +252,47 @@ def title_kind(fn):
         return kind_of(fn)
     tail = m.group(1)[-3:].lower()
     return "Base" if tail == "000" else "Update" if tail == "800" else "DLC"
+
+
+TID_RE = re.compile(r"\[(0100[0-9a-fA-F]{12})\]")
+
+
+def base_tid(tid):
+    # update = base | 0x800, DLC = base + 0x1000 + n: clearing 0x1FFF yields the base
+    return f"{int(tid, 16) & ~0x1FFF:016X}"
+
+
+def choice_label(fn, kind):
+    # ponytail: [vN] is a release counter (N // 65536), not a marketing version like "3.0.3"
+    v = re.search(r"\[v(\d+)\]", fn)
+    tag = re.search(r"(?<![\d.])v\d+(?:\.\d+)+", fn)
+    region = re.search(r"\[(US|EU|JP|USA|EUR|JPN|ASIA|KR|CN|UK|World)\]|\((USA|Europe|Japan|World|Asia|Korea|China)\)", fn)
+    ext = fn.rsplit(".", 1)[-1].lower() if "." in fn else ""
+    parts = [kind]
+    if tag:
+        parts.append(tag.group(0))
+    elif v and kind == "Update":
+        parts.append(f"rev {int(v.group(1)) // 65536}")
+    elif v:
+        parts.append(f"v{v.group(1)}")
+    if region:
+        parts.append(region.group(1) or region.group(2))
+    parts.append(f".{ext}")
+    if kind == "DLC":
+        parts.append(pretty_title(re.sub(r"\[[^\]]*\]|\([^)]*\)", " ", fn))[:40])
+    return " ".join(parts)
+
+
+def link_kind(text):
+    t = (text or "").lower()
+    return ("Update" if re.search(r"upd|update", t) else
+            "DLC" if re.search(r"dlc|booster|wave", t) else "Base")
+
+
+def link_choices(pairs):
+    # (url, label-or-url) -> typed link-only choices; host links never resolve automatically here
+    return [{"label": f"{link_kind(t)} · {urllib.parse.urlparse(u).netloc}", "kind": link_kind(t),
+             "url": u, "direct": False, "size": ""} for u, t in pairs]
 
 
 class Result:
@@ -370,7 +413,10 @@ class RomsFun:
                 out.append(Result(self.name, title, PLATFORM_LABELS[key], x["link"], meta={"pk": key}))
         return out
 
-    def resolve(self, result):
+    def files(self, result):
+        """[(row_url, label)] for every file on the game's download page."""
+        if result.meta.get("files") is not None:
+            return result.meta["files"]
         st, _, body = request(result.page, retries=2)
         m = re.search(r'href="(https://romsfun\.com/download/[^"/]+)[/"]',
                       body.decode("utf-8", "replace")) if st == 200 else None
@@ -384,8 +430,18 @@ class RomsFun:
                 files.append((u.group(1), clean(tr)))
         if not files:
             raise RuntimeError("no files listed")
+        result.meta["files"] = files
+        return files
+
+    def default_file(self, files):
         clean_files = [f for f in files if "hack" not in f[1].lower()] or files
-        pick = min(clean_files, key=lambda f: (not re.search(r"\b(USA|World)\b", f[1]), len(f[1])))
+        return files.index(min(clean_files, key=lambda f: (not re.search(r"\b(USA|World)\b", f[1]),
+                                                          len(f[1]))))
+
+    def resolve(self, result):
+        files = self.files(result)
+        picked = result.meta.get("picked")
+        pick = files[picked[0] if picked else self.default_file(files)]
         st, _, body = request(f"{self.base}/wp-admin/admin-ajax.php", data=b"action=k_get_download",
                               headers={"Content-Type": "application/x-www-form-urlencoded",
                                        "Referer": pick[0]}, retries=2)
@@ -427,17 +483,25 @@ class RomsLab:
                                   meta={"ext": "rar", "pk": "switch", "kind": "Base"}))
         return out
 
-    def resolve(self, result):
-        st, _, body = request(result.page, retries=2)
+    def buttons(self, page):
+        st, _, body = request(page, retries=2)
         if st != 200:
             raise RuntimeError(f"post unavailable ({st})")
-        h = body.decode("utf-8", "replace")
-        m = re.search(r'btn-download" target="_blank" href="https://filekeeper\.net/([a-z0-9]{12})/'
-                      r'([^"]+)">Mirror 2<', h)
+        return re.findall(r'btn-download" target="_blank" href="([^"]+)">([^<]+)<',
+                          body.decode("utf-8", "replace"))
+
+    def extras(self, result):
+        """link-only Base/Update/DLC buttons (datanodes etc.), typed from the button text."""
+        return link_choices([(u, t) for u, t in self.buttons(result.page)
+                             if "filekeeper.net" not in u])
+
+    def resolve(self, result):
+        btns = self.buttons(result.page)
+        m = next((re.match(r"https://filekeeper\.net/([a-z0-9]{12})/(.+)", u)
+                  for u, t in btns if t.strip() == "Mirror 2" and "filekeeper.net" in u), None)
         if not m:
-            links = re.findall(r'btn-download" target="_blank" href="([^"]+)"', h)
             raise RuntimeError("no filekeeper mirror (captcha hosts only) — links: "
-                               + " ".join(links[:4] or [result.page]))
+                               + " ".join([u for u, _ in btns][:4] or [result.page]))
         return (f"https://filekeeper.net/download?op=download2&id={m.group(1)}"
                 "&method_free=Free+download&down_direct=1", urllib.parse.unquote(m.group(2)))
 
@@ -542,17 +606,59 @@ class ArchiveOrg:
 
     def index_results(self, query, force=False, on_progress=None):
         toks = significant(norm(query).split())
-        out = []
+        groups, singles = {}, []
         for e in self.switch_index(force=force, on_progress=on_progress):
-            title = pretty_title(re.sub(r"\([^)]*\)", " ", os.path.basename(e["name"])))
-            if toks and all(t in norm(title) for t in toks):
-                out.append(Result(self.name, title, PLATFORM_LABELS["switch"],
-                                  f"{self.base}/download/{e['id']}/{urllib.parse.quote(e['name'])}",
-                                  human(e["size"]),
-                                  meta={"pk": "switch", "ext": e["name"].rsplit(".", 1)[-1].lower(),
-                                        "kind": title_kind(e["name"]), "bytes": e["size"],
-                                        "filename": os.path.basename(e["name"])}))
-        return out
+            fn = os.path.basename(e["name"])
+            title = pretty_title(re.sub(r"\([^)]*\)", " ", fn))
+            if not (toks and all(t in norm(title) for t in toks)):
+                continue
+            m = TID_RE.search(fn)
+            if m:
+                groups.setdefault(base_tid(m.group(1)), []).append((e, fn, title))
+            else:
+                singles.append(self._file_result(e, fn, title))
+        out = [self._group_result(tid, files) for tid, files in groups.items()]
+        return out + singles
+
+    def _file_result(self, e, fn, title):
+        return Result(self.name, title, PLATFORM_LABELS["switch"],
+                      f"{self.base}/download/{e['id']}/{urllib.parse.quote(e['name'])}",
+                      human(e["size"]),
+                      meta={"pk": "switch", "ext": fn.rsplit(".", 1)[-1].lower(),
+                            "kind": title_kind(fn), "bytes": e["size"], "filename": fn})
+
+    def _group_result(self, tid, files):
+        rel = lambda fn: int((re.search(r"\[v(\d+)\]", fn) or [0, 0])[1])
+        order = {"Base": 0, "Update": 1, "DLC": 2}
+        files.sort(key=lambda x: (order[title_kind(x[1])], -rel(x[1]), x[1]))
+        choices = []
+        for e, fn, _t in files:
+            kind = title_kind(fn)
+            choices.append({"label": choice_label(fn, kind), "kind": kind, "direct": True,
+                            "url": f"{self.base}/download/{e['id']}/{urllib.parse.quote(e['name'])}",
+                            "filename": fn, "size": human(e["size"]), "bytes": e["size"]})
+        bases = [i for i, c in enumerate(choices) if c["kind"] == "Base"]
+        ups = [i for i, c in enumerate(choices) if c["kind"] == "Update"]
+        default = []
+        if bases:  # prefer .nsp, then the first (sorted) base file
+            default.append(next((i for i in bases if choices[i]["filename"].lower().endswith(".nsp")),
+                                bases[0]))
+        if ups:
+            default.append(ups[0])  # newest release sorts first
+        for i in default:
+            choices[i]["default"] = True
+        head = choices[default[0]] if default else choices[0]
+        title = pretty_title(re.sub(r"\[[^\]]*\]|\([^)]*\)", " ", head["filename"])).rstrip(" +-_")
+        n_up = len(ups)
+        n_dlc = sum(c["kind"] == "DLC" for c in choices)
+        summary = " · ".join(x for x in (f"+{n_up} upd" if n_up else "",
+                                         f"{n_dlc} DLC" if n_dlc else "") if x)
+        first = choices[default[0]] if default else head
+        return Result(self.name, title, PLATFORM_LABELS["switch"], first["url"], first["size"],
+                      meta={"pk": "switch", "ext": first["filename"].rsplit(".", 1)[-1].lower(),
+                            "kind": "Base" if bases else "no base", "tid": tid,
+                            "bytes": first["bytes"], "filename": first["filename"],
+                            "choices": choices, "summary": summary})
 
     skip = ("_files.xml", "_meta.xml", "_meta.sqlite", "_archive.torrent", ".torrent")
     port_queries = (
@@ -670,6 +776,8 @@ class ArchiveOrg:
         return out
 
     def resolve(self, result):
+        if result.meta.get("url"):  # one picked choice of a grouped result
+            return result.meta["url"], result.meta.get("filename") or result.title
         if "/download/" in result.page:
             return result.page, result.meta.get("filename") or result.title
         ident = result.page.rsplit("/", 1)[-1]
@@ -834,6 +942,10 @@ class DlpsGame:
                 urls.append(u)
         return urls
 
+    def extras(self, result):
+        """every host link in the post, typed Base/Update/DLC from its URL."""
+        return link_choices([(u, u) for u in self.links(result.page)])
+
     def resolve(self, result):
         links = result.meta.get("links") or self.links(result.page)
         if not links:
@@ -920,6 +1032,27 @@ DLP = DlpsGame()
 RF = RomsFun()
 SOURCES = {"romsgames": RomsGames(), "romsfun": RF, "romslab": RomsLab(), "archive.org": ArchiveOrg(),
            "nps": NPS, "dlpsgame": DLP, "nswgame": NswGame()}
+
+
+def merge_dupes(results):
+    """TUI only: fold same (title, platform) rows from different sources into the best-ranked one.
+    A Title-ID group joins the row as an alt, so its versions show in the detail panel."""
+    out, by_key = [], {}
+    for r in results:
+        k = (norm(r.title), r.platform)
+        first = by_key.get(k)
+        if first is None:
+            by_key[k] = r
+            out.append(r)
+            continue
+        taken = {first.source} | {a.source for a in first.meta.get("alts", [])}
+        group_alt = r.meta.get("choices") and not any(a.meta.get("choices")
+                                                      for a in [first] + first.meta.get("alts", []))
+        if r.source not in taken or group_alt:
+            first.meta.setdefault("alts", []).append(r)
+        else:
+            out.append(r)  # same source twice (e.g. two regions): keep both rows
+    return out
 
 
 def rank(results, query):
@@ -1179,7 +1312,28 @@ def fix_magic_ext(path):
     return path
 
 
-def download(result, outdir, on_progress=None):
+def expand_choices(result):
+    """One Result per file to download: picked choices, else defaults; plain results pass through."""
+    choices = result.meta.get("choices")
+    if not choices:
+        return [result]
+    picked = result.meta.get("picked")
+    idx = picked if picked is not None else [i for i, c in enumerate(choices) if c.get("default")]
+    out = []
+    for i in idx:
+        c = choices[i]
+        if not c.get("direct"):
+            continue
+        m = dict(result.meta, url=c["url"], filename=c.get("filename"), kind=c["kind"],
+                 ext=(c.get("filename") or "").rsplit(".", 1)[-1].lower() or result.meta.get("ext"))
+        m.pop("choices", None)
+        m.pop("picked", None)
+        out.append(Result(result.source, f"{result.title} · {c['label']}", result.platform,
+                          c["url"], c.get("size", ""), meta=m))
+    return out
+
+
+def download(result, outdir, on_progress=None, cancel=None):
     if on_progress:
         on_progress(0, 0, f"looking for: {result.title[:45]}…")
     if result.meta.get("search_title"):
@@ -1188,6 +1342,12 @@ def download(result, outdir, on_progress=None):
         if not found:
             raise RuntimeError(f"could not find '{result.title}'")
         result = found[0]
+    jobs = expand_choices(result)
+    if len(jobs) != 1:
+        if not jobs:
+            raise RuntimeError("nothing to download (base not available; pick a file with i)")
+        return [download(j, outdir, on_progress, cancel) for j in jobs][-1]
+    result = jobs[0]
     src = SOURCES[result.source]
     if on_progress:
         on_progress(0, 0, f"getting link: {result.title[:45]}…")
@@ -1206,7 +1366,7 @@ def download(result, outdir, on_progress=None):
         on_progress(read, total, f"{pct:5.1f}%  {human(read)}/{human(total)}  "
                                  f"{bps / 1048576:.1f} MB/s")
 
-    stream(url, result.page if result.source != "nps" else None, cb, path)
+    stream(url, result.page if result.source != "nps" else None, cb, path, cancel)
     path = fix_magic_ext(path)
     if not validate(path):
         try:
@@ -1462,11 +1622,12 @@ def browse_items(platform_key):
 
 def run_tui(platform_key="", query="", outdir=None, force=False):
     from textual.app import App, ComposeResult
-    from textual.widgets import Input, DataTable, Footer, Header, Static
+    from textual.widgets import (Input, DataTable, Footer, Header, Static, OptionList, ProgressBar,
+                                 RadioSet, RadioButton, SelectionList, TextArea, Label)
     from textual.widgets.option_list import Option
-    from textual.widgets import OptionList
+    from textual.widgets.selection_list import Selection
     from textual.screen import ModalScreen
-    from textual.containers import Vertical
+    from textual.containers import Vertical, VerticalScroll, Horizontal
     from textual.binding import Binding
 
     outdir = outdir or OUT_DIR
@@ -1500,30 +1661,179 @@ def run_tui(platform_key="", query="", outdir=None, force=False):
         def action_cancel(self):
             self.dismiss(None)
 
+    PICKER_HEAD = ("switch", "ps4", "ps2", "gba", "nds", "psp")
+
     class PlataformasScreen(OptionsScreen):
         def compose(self) -> ComposeResult:
             with Vertical(id="opts"):
                 yield Static("Platform", id="opts-title")
-                opts = [("All", "all")] + [(PLATFORM_LABELS[k], k) for k in sorted(PLATFORM_LABELS)]
-                yield OptionList(*[Option(t, id=i) for t, i in opts], id="opts-list")
-                yield Static("↑↓ move · Enter choose · esc close", id="opts-hint")
+                yield Input(placeholder="type to filter…", id="opts-filter")
+                yield OptionList(id="opts-list")
+                yield Static("type to filter · ↑↓ move · Enter choose · esc close", id="opts-hint")
+
+        def on_mount(self):
+            rest = sorted(k for k in PLATFORM_LABELS if k not in PICKER_HEAD)
+            self.all_opts = ([("All", "all")] + [(PLATFORM_LABELS[k], k) for k in PICKER_HEAD]
+                             + [(PLATFORM_LABELS[k], k) for k in rest])
+            self._filter("")
+            self.query_one("#opts-filter", Input).focus()
+
+        def _filter(self, text):
+            ol = self.query_one(OptionList)
+            ol.clear_options()
+            t = text.strip().lower()
+            ol.add_options([Option(lbl, id=i) for lbl, i in self.all_opts
+                            if not t or t in lbl.lower() or t in i])
+            if ol.option_count:
+                ol.highlighted = 0
+
+        def on_input_changed(self, event):
+            self._filter(event.value)
+
+        def on_input_submitted(self, event):
+            ol = self.query_one(OptionList)
+            if ol.highlighted is not None:
+                self.dismiss(ol.get_option_at_index(ol.highlighted).id)
+
+        def on_key(self, event):
+            # arrows move the list while typing goes to the filter
+            if event.key in ("up", "down"):
+                ol = self.query_one(OptionList)
+                (ol.action_cursor_up if event.key == "up" else ol.action_cursor_down)()
+                event.stop()
+
+    class DetailScreen(ModalScreen):
+        CSS = """
+        DetailScreen { align: center middle; background: $background 60%; }
+        #det { width: 96; height: 90%; background: $surface; border: round $primary; padding: 0 1; }
+        #det-head { text-style: bold; }
+        #det-sub { color: $text-muted; margin-bottom: 1; }
+        .det-h { text-style: bold; margin-top: 1; }
+        RadioSet, SelectionList { height: auto; max-height: 12; width: 100%; }
+        #det-links { height: 8; }
+        #det-hint { text-style: dim italic; }
+        """
+        BINDINGS = [Binding("escape", "cancel", "Close"),
+                    Binding("ctrl+d", "queue", "Queue picks"),
+                    Binding("ctrl+s", "queue", "Queue picks", show=False)]
+
+        def __init__(self, result, extras, files, vr=None):
+            super().__init__()
+            self.r, self.extras, self.files = result, extras, files
+            self.alts = result.meta.get("alts") or []
+            # vr: the row whose versions are listed (a merged alt when the top row has none)
+            self.vr = vr or result
+            ch = self.vr.meta.get("choices") or []
+            self.base_idx = [i for i, c in enumerate(ch) if c["kind"] == "Base"]
+            self.extra_idx = [i for i, c in enumerate(ch) if c["kind"] in ("Update", "DLC")]
+
+        def compose(self) -> ComposeResult:
+            r = self.vr  # the source that carries versions (may be a merged alt)
+            ch = r.meta.get("choices") or []
+            src = SOURCES.get(r.source)
+            how = "direct download" if getattr(src, "direct", True) else "host links only (browser)"
+            with VerticalScroll(id="det"):
+                yield Static(self.r.title, id="det-head")
+                tid = f" · {r.meta['tid']}" if r.meta.get("tid") else ""
+                yield Static(f"{r.platform} · {r.source} · {how}{tid}", id="det-sub")
+                if self.alts:
+                    yield Label("Source (versions below are for the first source with a version list)",
+                                classes="det-h")
+                    with RadioSet(id="det-src"):
+                        for i, a in enumerate([self.r] + self.alts):
+                            yield RadioButton(a.source, value=a is r)
+                if ch:
+                    yield Label("Base", classes="det-h")
+                    if self.base_idx:
+                        with RadioSet(id="det-base"):
+                            for i in self.base_idx:
+                                c = ch[i]
+                                yield RadioButton(f"{c['label']}  {c['size']}", value=bool(c.get("default")))
+                    else:
+                        yield Static("base not available in this source")
+                    if self.extra_idx:
+                        yield Label("Updates & DLC", classes="det-h")
+                        yield SelectionList(*[Selection(f"{ch[i]['label']}  {ch[i]['size']}", i,
+                                                        bool(ch[i].get("default")))
+                                              for i in self.extra_idx], id="det-extra")
+                elif self.files:
+                    yield Label("Version", classes="det-h")
+                    d = SOURCES["romsfun"].default_file(self.files)
+                    with RadioSet(id="det-file"):
+                        for i, (_u, lbl) in enumerate(self.files):
+                            yield RadioButton(lbl[:80], value=i == d)
+                if self.extras:
+                    yield Label("Manual links (open in a browser)", classes="det-h")
+                    yield TextArea("\n".join(f"{c['kind']:<6} {c['url']}" for c in self.extras),
+                                   read_only=True, soft_wrap=False, id="det-links")
+                yield Static("space/enter choose · ctrl+d queue · esc close", id="det-hint")
+
+        def action_cancel(self):
+            self.dismiss(None)
+
+        def action_queue(self):
+            rows = [self.r] + self.alts
+            r = self.vr
+            if self.alts:
+                rs = self.query_one("#det-src", RadioSet)
+                chosen = rows[rs.pressed_index if rs.pressed_index >= 0 else rows.index(r)]
+                if chosen is not r:  # a source without the version list: its own defaults apply
+                    self.dismiss([chosen])
+                    return
+            ch = r.meta.get("choices") or []
+            if ch:
+                picked = []
+                if self.base_idx:
+                    rs = self.query_one("#det-base", RadioSet)
+                    if rs.pressed_index >= 0:
+                        picked.append(self.base_idx[rs.pressed_index])
+                if self.extra_idx:
+                    picked += list(self.query_one("#det-extra", SelectionList).selected)
+                r.meta["picked"] = picked
+            elif self.files:
+                rs = self.query_one("#det-file", RadioSet)
+                r.meta["picked"] = [max(rs.pressed_index, 0)]
+            self.dismiss([r])
+
+    class QueueRow(Horizontal):
+        DEFAULT_CSS = """
+        QueueRow { height: 1; }
+        QueueRow .q-title { width: 44; }
+        QueueRow ProgressBar { width: 34; }
+        QueueRow .q-msg { width: 1fr; color: $text-muted; }
+        """
+
+        def __init__(self, job):
+            super().__init__()
+            self.job = job
+
+        def compose(self) -> ComposeResult:
+            yield Static(self.job["title"][:42], classes="q-title")
+            yield ProgressBar(total=None, show_eta=False, show_percentage=False, id=f"pb{self.job['id']}")
+            yield Static("queued", classes="q-msg")
+
 
     class RomApp(App):
         TITLE = "rom"
         CSS = """
         Input { dock: top; }
         #status { height: 1; background: $surface; padding: 0 1; }
+        #queue { height: auto; max-height: 8; border-top: solid $primary; display: none; }
+        #queue.show { display: block; }
         Footer { dock: bottom; }
         DataTable { height: 1fr; }
         """
         BINDINGS = [
             Binding("d", "download", "Download"),
+            Binding("i", "detail", "Details"),
             Binding("space", "toggle", "Mark"),
             Binding("slash", "focus_search", "Search"),
             Binding("p", "platform", "Platform"),
             Binding("n", "next_page", "Page+"),
             Binding("b", "prev_page", "Page-"),
             Binding("ctrl+b", "palette", "Options"),
+            Binding("x", "cancel_job", "Cancel dl"),
+            Binding("w", "toggle_queue", "Queue", show=False),
             Binding("ctrl+a", "select_all", "Mark all", show=False),
             Binding("ctrl+n", "select_none", "Clear", show=False),
             Binding("q", "quit", "Quit"),
@@ -1540,11 +1850,14 @@ def run_tui(platform_key="", query="", outdir=None, force=False):
             self.force = force
             self.browse_items = None
             self.page = 0
+            self.jobs, self.job_seq, self.job_lock = [], 0, threading.Lock()
+            self.worker = None
 
         def compose(self) -> ComposeResult:
             yield Header(show_clock=True)
             yield Input(placeholder="Type the game name and press Enter…  (p switches platform)")
             yield DataTable(cursor_type="row")
+            yield VerticalScroll(id="queue")
             yield Static("", id="status")
             yield Footer()
 
@@ -1599,7 +1912,7 @@ def run_tui(platform_key="", query="", outdir=None, force=False):
                     on_progress=lambda d, t: self._busy_msg(f"building the catalog index… {d}/{t}"),
                     force=self.force)
                 self.force = False
-                self.call_from_thread(self._show, rank(results, q))
+                self.call_from_thread(self._show, merge_dupes(rank(results, q)))
             except Exception as e:
                 self.call_from_thread(self._set_status, f"✖ search error: {e}")
 
@@ -1683,7 +1996,8 @@ def run_tui(platform_key="", query="", outdir=None, force=False):
                 vals.append(r.kind or "-")
             if self.show_size:
                 vals.append(r.size or "?")
-            vals.append(r.source or "")
+            vals.append(r.source + (f" +{len(r.meta['alts'])}" if r.meta.get("alts") else "")
+                        + (f" · {r.meta['summary']}" if r.meta.get("summary") else ""))
             style = "bold on #1f3d2b" if sel else None
             return [mark] + [RT(str(v), style=style) if style else str(v) for v in vals]
 
@@ -1775,36 +2089,115 @@ def run_tui(platform_key="", query="", outdir=None, force=False):
             # DataTable consumes Enter as RowSelected; download just that row, marks untouched
             self.action_download()
 
-        def action_download(self):
+        def _current(self):
             table = self.query_one(DataTable)
             if table.cursor_row is None or not self.results:
-                return
-            self._batch([self.results[table.cursor_row]])
+                return None
+            return self.results[table.cursor_row]
 
+        def action_download(self):
+            r = self._current()
+            if r is not None:
+                self._batch([r])
+
+        def action_detail(self):
+            r = self._current()
+            if r is None:
+                return
+            self._busy = f"loading details: {r.title[:40]}…"
+            threading.Thread(target=self._detail_bg, args=(r,), daemon=True).start()
+
+        def _detail_bg(self, r):
+            extras, files, vr = [], None, None
+            for s in [r] + (r.meta.get("alts") or []):  # merged rows: every source's links + versions
+                src = SOURCES.get(s.source)
+                try:
+                    if hasattr(src, "extras"):
+                        extras += src.extras(s)
+                    if vr is None and s.meta.get("choices"):
+                        vr = s
+                    elif vr is None and s.source == "romsfun":
+                        files, vr = src.files(s), s
+                except Exception as e:
+                    self.call_from_thread(self._set_status, f"✖ details ({s.source}): {e}")
+            self.call_from_thread(self._open_detail, r, extras, files, vr)
+
+        def _open_detail(self, r, extras, files, vr=None):
+            self._set_status(f"{r.title[:60]} · {self._hint()}")
+            self.push_screen(DetailScreen(r, extras, files, vr),
+                             callback=lambda rows: rows and self._batch(rows))
+
+        # --- download queue: one worker drains self.jobs; each job is one file -------------
         def _batch(self, rows):
             if not rows:
                 self._set_status("nothing selected")
                 return
-            self._set_status(f"downloading 0/{len(rows)}…")
-            threading.Thread(target=self._batch_bg, args=(rows,), daemon=True).start()
+            q = self.query_one("#queue")
+            q.add_class("show")
+            with self.job_lock:
+                for r in rows:
+                    for j in expand_choices(r) or [r]:
+                        self.job_seq += 1
+                        job = {"id": self.job_seq, "title": j.title, "result": j, "state": "queued",
+                               "cancel": threading.Event()}
+                        self.jobs.append(job)
+                        row = QueueRow(job)
+                        job["row"] = row
+                        q.mount(row)
+            self._set_status(f"queued {len(rows)} · {self._queue_summary()}")
+            if self.worker is None or not self.worker.is_alive():
+                self.worker = threading.Thread(target=self._drain, daemon=True)
+                self.worker.start()
 
-        def _batch_bg(self, rows):
-            ok, fail, total = 0, 0, len(rows)
-            for n, r in enumerate(rows, 1):
-                label = f"{n}/{total} {r.title[:38]}"
+        def _queue_summary(self):
+            c = {}
+            for j in self.jobs:
+                c[j["state"]] = c.get(j["state"], 0) + 1
+            return " · ".join(f"{v} {k}" for k, v in c.items())
 
-                def prog(read, tot, msg, label=label):
-                    self.call_from_thread(self._set_status, f"downloading {label} · {msg}")
+        def _job_ui(self, job, msg=None, read=None, total=None):
+            row = job["row"]
+            pb = row.query_one(ProgressBar)
+            if total:
+                pb.update(total=total, progress=read)
+            if msg is not None:
+                row.query(".q-msg").first().update(msg)
+
+        def _drain(self):
+            while True:
+                with self.job_lock:
+                    job = next((j for j in self.jobs if j["state"] == "queued"), None)
+                    if job is None:
+                        break
+                    job["state"] = "running"
+
+                def prog(read, tot, msg, job=job):
+                    self.call_from_thread(self._job_ui, job, msg, read, tot)
                 try:
-                    path = download(r, self.outdir, on_progress=prog)
-                    ok += 1
-                    self.call_from_thread(self._set_status, f"✔ {path}")
+                    path = download(job["result"], self.outdir, on_progress=prog, cancel=job["cancel"])
+                    job["state"] = "done"
+                    self.call_from_thread(self._job_ui, job, f"✔ {os.path.basename(path)}")
                 except Exception as e:
-                    fail += 1
-                    self.call_from_thread(self._set_status, f"✖ {r.title[:40]}: {e}")
-            self.call_from_thread(self._set_status,
-                                  f"✔ {ok}/{total} downloaded to {self.outdir}"
-                                  + (f" · {fail} failed" if fail else ""))
+                    job["state"] = "cancelled" if job["cancel"].is_set() else "failed"
+                    msg = "✖ cancelled (.part kept)" if job["cancel"].is_set() else f"✖ {e}"
+                    self.call_from_thread(self._job_ui, job, msg)
+            self.call_from_thread(self._set_status, f"queue finished · {self._queue_summary()} · {self.outdir}")
+
+        def action_cancel_job(self):
+            # cancel the running job, else the newest queued one
+            with self.job_lock:
+                job = (next((j for j in self.jobs if j["state"] == "running"), None)
+                       or next((j for j in reversed(self.jobs) if j["state"] == "queued"), None))
+                if job is None:
+                    return
+                job["cancel"].set()
+                if job["state"] == "queued":
+                    job["state"] = "cancelled"
+            if job["state"] == "cancelled":
+                self._job_ui(job, "✖ cancelled")
+
+        def action_toggle_queue(self):
+            self.query_one("#queue").toggle_class("show")
 
     RomApp(platform_key, query, outdir, force).run()
 

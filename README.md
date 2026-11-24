@@ -58,15 +58,37 @@ that platform's whole catalog (pages of 300, `n`/`b` to move) — so you can
 browse without typing anything. Typing in the field and pressing `Enter` goes
 back to searching.
 
-In the UI: `↑↓` navigate, `Enter` or `d` download the highlighted row, `space`
-mark, `ctrl+b` options palette ("Download selected" downloads the marked rows),
-`/` jump to the search field, `p` pick a platform (it browses the catalog when
-the search field is empty, otherwise it searches there), `n`/`b` page, `ctrl+a`
-mark all, `ctrl+n` clear marks, `q` quit. The footer lists the keys.
+In the UI: `↑↓` navigate, `Enter` or `d` download the highlighted row, `i`
+details and versions, `space` mark, `ctrl+b` options palette ("Download
+selected" downloads the marked rows), `/` jump to the search field, `p` pick a
+platform (type to filter; it browses the catalog when the search field is empty,
+otherwise it searches there), `n`/`b` page, `x` cancel the running download,
+`w` show/hide the download queue, `ctrl+a` mark all, `ctrl+n` clear marks, `q`
+quit. The footer lists the keys.
 
 Row markers: `↓` downloads directly, `↗` gives host links to open in a browser,
 `★` is an exact match for a Wikipedia best-seller (hacks never get it). The Type
-and Size columns only appear when at least one row has a value.
+and Size columns only appear when at least one row has a value. The same game
+found on several sources is one row; `Source` shows `romslab +2` and Switch rows
+add a summary such as `+2 upd · 1 DLC`.
+
+**Details (`i`)** lists everything behind a row:
+
+- **Source**: switch between the merged sources.
+- **Base / Version**: pick one file. For Switch: format, region and version
+  (`v1.2.1`, or `rev N` for an update's release number). For romsfun: region,
+  revision, Virtual Console, proto or hack.
+- **Updates & DLC** (Switch): tick any number; the newest update is pre-ticked.
+- **Manual links**: host links typed Base/Update/DLC (datanodes, megaup…) to
+  copy into a browser; they cannot be queued.
+
+`ctrl+d` queues the picks. Without opening the panel, `Enter`/`d`/`-y` download
+the defaults: romsfun's USA/World non-hack file, Switch's `.nsp` base plus the
+newest update.
+
+Downloads go through a **queue** at the bottom: one progress bar per file,
+errors stay visible, and `x` cancels the running file (its `.part` stays, so
+the next attempt resumes).
 
 | Flag | Description |
 |------|-------------|
