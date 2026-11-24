@@ -64,33 +64,37 @@ current one), `p` switch platform, `n`/`b` page, `ctrl+b` options palette,
 | `-l, --platforms` | list platforms |
 
 Platforms: `switch`, `switchports`, `ps5`, `ps4`, `ps3`, `psv`, `ps2`, `ps1`,
-`psp`, `nds`, `gba`, `snes`, `pc`, `nes`, `gb`, `gbc`, `n64`, `3ds`, `gc`, `wii`,
-`genesis`, `mastersystem`, `dreamcast`, `saturn`, `arcade`.
+`psp`, `nds`, `gba`, `snes`, `pc`, `dos`, `nes`, `gb`, `gbc`, `n64`, `3ds`, `gc`,
+`wii`, `wiiu`, `xbox`, `xbox360`, `genesis`, `mastersystem`, `gamegear`, `segacd`,
+`dreamcast`, `saturn`, `arcade`.
 
 Files go to `~/Downloads/roms/<platform>/`.
 
 ## How it works
 
-- **Switch**: the dlarchive index (`files_api.php`). The nsp-roms page embeds
-  links with a token that expires; here `rom` resolves through the index and
-  grabs a direct, token-free URL. It also works for NDS, GBA, SNES and PC.
-- **Switch ports**: the `switchports` platform merges two sources — the dlarchive
-  catalog and an Archive.org scan (`switch port` / `homebrew port` / `nsp`+`port`),
-  with a 7-day cache. Around 35 ports (GTA, Halo, Simpsons Hit & Run, SM64 NX,
-  Twilight Princess, Cave Story, Pizza Tower, Max Payne, Hello Neighbor, Diablo...).
+Each platform has an ordered list of providers (`PLATFORMS` in `bin/rom`); a
+search queries all of them and merges the results.
+
+- **RomsFun** (`romsfun.com`): WP REST search + the public download page, which
+  hands out a signed `statics.romsfun.com` link. Covers most retro consoles plus
+  PS3/PS4/PS Vita, Wii U, Xbox/360, PC and DOS. RomsFun has no Switch files.
+- **RomsGames**: search + a POST that returns the file (NES … PS2, Sega, arcade).
+- **Switch**: Archive.org (`nsp`/`xci`/`nsz` items, direct download) and
+  nswgame (`nswgf.com`, the Switch sister of dlpsgame). nswgame posts link file
+  hosts (MegaUp, 1fichier, datanodes…) that sit behind Cloudflare/captcha, so
+  `rom` prints those links for you to open in a browser.
+  The old dlarchive source closed its public API (HTTP 403) and was removed.
+- **Switch ports**: Archive.org scan (`switch port` / `homebrew port` /
+  `nsp`+`port`), 7-day cache.
 - **PS3 and PS Vita**: NoPayStation — downloads `.pkg` straight from Sony's CDN
   (`zeus.dl.playstation.net`), no token needed.
-- **PS2, PS1 and PSP**: RomsGames (search + a POST that returns the file).
 - **PS4 and PS5**: dlpsgame (search via WP REST). The direct download works when
   the post links a supported host (mediafire, Google Drive, 1fichier); when it
-  doesn't, `rom` shows the page so you can grab the link yourself.
-- **Best sellers first**: while browsing a platform, the best-selling titles
-  (Wikipedia lists, 30-day cache) come first with ★; the rest follow alphabetically.
-  Platforms without a full listing (PS4/PS5) are browsed through that best-seller
-  list itself.
+  doesn't, `rom` shows the links so you can grab the file yourself.
+- **Best sellers first**: browsing a platform lists the best-selling titles
+  (Wikipedia lists, 30-day cache) with ★; picking one searches the providers.
 - **Fallback**: Archive.org on platforms with a thin catalogue.
-- The catalog index is cached (`~/.cache/rom-cli/dlarchive.json`, 12h TTL) —
-  which makes searches instant. `--refresh` rebuilds it.
+- Caches live in `~/.cache/rom-cli/`; `--refresh` refetches them.
 - Ranking is by title match, with a penalty for hacks/translations/betas and a
   preference for `Base` over `Update`/`DLC`.
 - Files are validated before being written (zip, 7z, `PFS0` for `.nsp`, and
