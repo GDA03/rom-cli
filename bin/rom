@@ -36,7 +36,8 @@ CACHE_DIR = os.path.expanduser(os.environ.get("XDG_CACHE_HOME") or "~/.cache") +
 
 # platform key -> providers tried in order: (source name, source arg)
 PLATFORMS = {
-    "switch": [("archive.org", "switch"), ("nswgame", "switch")],
+    "switch": [("romslab", "switch"), ("archive.org", "switchindex"), ("archive.org", "switch"),
+               ("nswgame", "switch")],
     "switchports": [],
     "nds": [("romsfun", "nds"), ("romsgames", ["nintendo-ds"])],
     "gba": [("romsfun", "gba"), ("romsgames", ["gameboy-advance"])],
@@ -242,6 +243,14 @@ def stream(url, referer, on_progress, dest):
     return read
 
 
+def title_kind(fn):
+    m = re.search(r"\[(0100[0-9a-fA-F]{12})\]", fn or "")
+    if not m:
+        return kind_of(fn)
+    tail = m.group(1)[-3:].lower()
+    return "Base" if tail == "000" else "Update" if tail == "800" else "DLC"
+
+
 class Result:
     __slots__ = ("source", "title", "platform", "size", "page", "meta")
 
@@ -388,6 +397,47 @@ class RomsFun:
         return url, urllib.parse.unquote(os.path.basename(urllib.parse.urlparse(url).path))
 
 
+class RomsLab:
+    name = "romslab"
+    base = "https://romslab.com"
+
+    def search(self, query, pk=None):
+        url = (f"{self.base}/wp-json/wp/v2/search?"
+               f"search={urllib.parse.quote_plus(query)}&per_page=20")
+        st, _, body = request(url, headers={"Accept": "application/json"}, retries=2)
+        if st != 200:
+            return []
+        try:
+            data = json.loads(body.decode("utf-8", "replace"))
+        except Exception:
+            return []
+        out = []
+        for x in data:
+            link = x.get("url") or ""
+            slug = link.rstrip("/").rsplit("/", 1)[-1].lower()
+            if "switch" not in slug or "switch-2" in slug:
+                continue
+            title = re.sub(r"(?i)\s+switch\b.*$", "", clean(x.get("title") or ""))
+            if title:
+                out.append(Result(self.name, title, PLATFORM_LABELS["switch"], link,
+                                  meta={"ext": "rar", "pk": "switch", "kind": "Base"}))
+        return out
+
+    def resolve(self, result):
+        st, _, body = request(result.page, retries=2)
+        if st != 200:
+            raise RuntimeError(f"post unavailable ({st})")
+        h = body.decode("utf-8", "replace")
+        m = re.search(r'btn-download" target="_blank" href="https://filekeeper\.net/([a-z0-9]{12})/'
+                      r'([^"]+)">Mirror 2<', h)
+        if not m:
+            links = re.findall(r'btn-download" target="_blank" href="([^"]+)"', h)
+            raise RuntimeError("no filekeeper mirror (captcha hosts only) — links: "
+                               + " ".join(links[:4] or [result.page]))
+        return (f"https://filekeeper.net/download?op=download2&id={m.group(1)}"
+                "&method_free=Free+download&down_direct=1", urllib.parse.unquote(m.group(2)))
+
+
 class ArchiveOrg:
     name = "archive.org"
     base = "https://archive.org"
@@ -407,6 +457,80 @@ class ArchiveOrg:
         "saturn": ("Saturn", ["cue", "bin", "chd", "zip"]), "arcade": ("Arcade", ["zip"]),
         "switch": ("switch OR nsp OR xci OR nsz", ["nsp", "xci", "nsz", "7z", "zip", "rar"]),
     }
+    index_query = ("mediatype:software AND -collection:loggedin AND "
+                   "(subject:(nsp OR nsz OR xci OR switch) OR title:(nsp OR nsz OR xci OR switch)) "
+                   "AND files_count:[3 TO *] AND item_size:[500000000 TO *]")
+
+    def switch_index(self, force=False, on_progress=None):
+        global INDEX_CACHE
+        if INDEX_CACHE is not None and not force:
+            return INDEX_CACHE
+        if not force and os.path.exists(INDEX_FILE):
+            try:
+                d = json.load(open(INDEX_FILE))
+                if (time.time() - d.get("fetched_at", 0) < INDEX_TTL
+                        and d.get("ver") == INDEX_VER and d.get("items")):
+                    INDEX_CACHE = d["items"]
+                    return INDEX_CACHE
+            except Exception:
+                pass
+        url = (f"{self.base}/advancedsearch.php?q={urllib.parse.quote(self.index_query)}"
+               "&fl%5B%5D=identifier&sort%5B%5D=item_size+desc&rows=500&output=json")
+        st, _, body = request(url, retries=2, timeout=60)
+        if st != 200:
+            raise RuntimeError(f"archive.org search failed ({st})")
+        idents = [d["identifier"] for d in
+                  json.loads(body.decode("utf-8", "replace"))["response"]["docs"]]
+        done = [0]
+        lock = threading.Lock()
+
+        def work(ident):
+            try:
+                st, _, body = request(f"{self.base}/metadata/{ident}", retries=2,
+                                      headers={"Accept": "application/json"}, timeout=40)
+                data = json.loads(body.decode("utf-8", "replace")) if st == 200 else {}
+            except Exception:
+                data = {}
+            with lock:
+                done[0] += 1
+                if on_progress:
+                    on_progress(done[0], len(idents))
+            files = data.get("files") or []
+            if (data.get("metadata") or {}).get("access-restricted-item") or any(
+                    f.get("private") for f in files):
+                return []
+            return [{"id": ident, "name": f["name"], "size": int(f.get("size") or 0)}
+                    for f in files if re.search(r"(?i)\.(nsp|nsz|xci)$", f["name"])]
+
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            items = [e for batch in pool.map(work, idents) for e in batch]
+        if not items:
+            raise RuntimeError("archive.org Switch index is empty")
+        try:
+            os.makedirs(CACHE_DIR, exist_ok=True)
+            tmp = INDEX_FILE + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump({"fetched_at": time.time(), "ver": INDEX_VER, "items": items}, f)
+            os.replace(tmp, INDEX_FILE)
+        except Exception:
+            pass
+        INDEX_CACHE = items
+        return items
+
+    def index_results(self, query, force=False, on_progress=None):
+        toks = significant(norm(query).split())
+        out = []
+        for e in self.switch_index(force=force, on_progress=on_progress):
+            title = pretty_title(re.sub(r"\([^)]*\)", " ", os.path.basename(e["name"])))
+            if toks and all(t in norm(title) for t in toks):
+                out.append(Result(self.name, title, PLATFORM_LABELS["switch"],
+                                  f"{self.base}/download/{e['id']}/{urllib.parse.quote(e['name'])}",
+                                  human(e["size"]),
+                                  meta={"pk": "switch", "ext": e["name"].rsplit(".", 1)[-1].lower(),
+                                        "kind": title_kind(e["name"]), "bytes": e["size"],
+                                        "filename": os.path.basename(e["name"])}))
+        return out
+
     skip = ("_files.xml", "_meta.xml", "_meta.sqlite", "_archive.torrent", ".torrent")
     port_queries = (
         'title:("switch port") AND mediatype:software',
@@ -498,7 +622,9 @@ class ArchiveOrg:
                                     "pk": "switch", "kind": "Port"}))
         return out
 
-    def search(self, query, platform_key=None):
+    def search(self, query, platform_key=None, on_progress=None, force=False):
+        if platform_key == "switchindex":
+            return self.index_results(query, force=force, on_progress=on_progress)
         if platform_key not in self.tags:
             return []
         tag, exts = self.tags[platform_key]
@@ -521,6 +647,8 @@ class ArchiveOrg:
         return out
 
     def resolve(self, result):
+        if "/download/" in result.page:
+            return result.page, result.meta.get("filename") or result.title
         ident = result.page.rsplit("/", 1)[-1]
         st, _, body = request(f"{self.base}/metadata/{ident}", retries=2,
                               headers={"Accept": "application/json"})
@@ -644,7 +772,7 @@ class DlpsGame:
     HOSTS = ("drive.google.com", "docs.google.com", "mediafire.com", "1fichier.com",
              "gofile.io", "akirabox", "vikingfile", "rootz.so", "1cloudfile.com",
              "ranoz.gg", "mega.nz", "megaup.net", "send.now", "datanodes.to", "frdl.",
-             "multiup.io", "buzzheavier.com")
+             "multiup.io", "buzzheavier.com", "pixeldrain.com")
 
     def search(self, query, pk=None, on_progress=None, force=False):
         url = (f"{self.base}/wp-json/wp/v2/search?"
@@ -686,13 +814,15 @@ class DlpsGame:
         if not links:
             raise RuntimeError(f"no links in the post — open {result.page}")
         order = []
-        for host in ("mediafire", "google", "1fichier", "gofile", "akirabox",
+        for host in ("pixeldrain", "mediafire", "google", "1fichier", "gofile", "akirabox",
                      "vikingfile", "rootz", "1cloudfile", "ranoz", "mega"):
             order += [u for u in links if host in u and u not in order]
         order += [u for u in links if u not in order]
         errors = []
         for u in order:
             try:
+                if "pixeldrain.com" in u:
+                    return self._pixeldrain(u), ""
                 if "mediafire.com" in u:
                     d, n = self._mediafire(u)
                     return d, n
@@ -718,6 +848,12 @@ class DlpsGame:
         if not d:
             raise RuntimeError("mediafire link not found")
         return d.group(1), name
+
+    def _pixeldrain(self, u):
+        m = re.search(r"pixeldrain\.com/(?:u|api/file)/(\w+)", u)
+        if not m:
+            raise RuntimeError("pixeldrain id not found")
+        return f"https://pixeldrain.com/api/file/{m.group(1)}?download"
 
     def _gdrive(self, u):
         m = re.search(r"/(?:file/d/|id=)([A-Za-z0-9_-]{20,})", u)
@@ -747,16 +883,17 @@ class NswGame(DlpsGame):
     ext = "nsp"
 
     def resolve(self, result):
-        # posts also link save files/mods; only take links that name a Switch package
+        # posts also link save files/mods; keep links that name a Switch package, plus
+        # direct hosts whose URLs carry no filename
         links = self.links(result.page)
-        result.meta["links"] = [u for u in links if re.search(r"(?i)ns[pz]|xci", u)] or links
+        result.meta["links"] = [u for u in links if re.search(r"(?i)ns[pz]|xci|pixeldrain", u)] or links
         return super().resolve(result)
 
 
 NPS = NoPayStation()
 DLP = DlpsGame()
 RF = RomsFun()
-SOURCES = {"romsgames": RomsGames(), "romsfun": RF, "archive.org": ArchiveOrg(),
+SOURCES = {"romsgames": RomsGames(), "romsfun": RF, "romslab": RomsLab(), "archive.org": ArchiveOrg(),
            "nps": NPS, "dlpsgame": DLP, "nswgame": NswGame()}
 
 
@@ -786,7 +923,7 @@ def rank(results, query):
         if r.source == "dlpsgame":
             s -= 5
         elif r.source == "nswgame":
-            s -= 10
+            s -= 12
         if len(r.title) > 70:
             s -= 6
         return s
@@ -816,8 +953,9 @@ def search(query, platform_key=None, on_progress=None, force=False):
         if platform_key:
             for src_name, arg in PLATFORMS[platform_key]:
                 try:
-                    if src_name == "nps":
-                        add(NPS.search(attempt, arg, on_progress=on_progress, force=force))
+                    if src_name == "nps" or arg == "switchindex":
+                        add(SOURCES[src_name].search(attempt, arg, on_progress=on_progress,
+                                                     force=force))
                     else:
                         add(SOURCES[src_name].search(attempt, arg))
                 except Exception:
@@ -833,7 +971,7 @@ def search(query, platform_key=None, on_progress=None, force=False):
                     add(NPS.search(attempt, "ps3", on_progress=on_progress, force=force))
                 except Exception:
                     pass
-                for src in (DLP, SOURCES["nswgame"]):
+                for src in (DLP, SOURCES["nswgame"], SOURCES["romslab"]):
                     try:
                         add(src.search(attempt, None))
                     except Exception:
@@ -957,6 +1095,9 @@ def validate(path):
     if name.endswith(".pkg"):
         with open(path, "rb") as f:
             return f.read(4) in (b"\x7fPKG", b"\x7fCNT")
+    if name.endswith(".rar"):
+        with open(path, "rb") as f:
+            return f.read(6) == b"Rar!\x1a\x07"
     return True
 
 
@@ -1071,6 +1212,10 @@ PORTS_FILE = os.path.join(CACHE_DIR, "switchports.json")
 PORTS_TTL = 7 * 86400
 PORTS_VER = 2
 PORTS_CACHE = None
+INDEX_FILE = os.path.join(CACHE_DIR, "switchindex.json")
+INDEX_TTL = 7 * 86400
+INDEX_VER = 1
+INDEX_CACHE = None
 POPULAR = None
 POPULAR_NORM = None
 LABEL_KEY = {}
@@ -1640,9 +1785,11 @@ def main():
                        on_progress=lambda d, t: status(f"   NoPayStation {d}/{t}"))
         ports = SOURCES["archive.org"].switch_ports(
             force=args.refresh, on_progress=lambda d, t: status(f"   Switch ports {d}/{t}"))
+        files = SOURCES["archive.org"].switch_index(
+            force=args.refresh, on_progress=lambda d, t: status(f"   Switch index {d}/{t} items"))
         clear_status()
         write(f"  NoPayStation: {sum(len(v) for v in nps.values())} titles · "
-              f"Switch ports: {len(ports)}")
+              f"Switch ports: {len(ports)} · Switch index: {len(files)} files")
         write(f"  cache: {CACHE_DIR}")
         pop = load_popular(force=args.refresh)
         top = ", ".join(f"{k}({len(v)})" for k, v in sorted(pop.items()) if v)

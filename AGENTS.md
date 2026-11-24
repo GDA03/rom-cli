@@ -19,15 +19,19 @@ flowchart LR
 - **Source contract**:
   - Required: a `name` class attribute, `search(query, arg, …)`, and `resolve(result) -> (direct_url, filename)`.
   - Optional: `all_items(arg)`, which enables full-catalog browsing.
-  - Sources: `RomsGames`, `RomsFun`, `ArchiveOrg`, `NoPayStation`, `DlpsGame`, and `NswGame`, which subclasses `DlpsGame` for the Switch site `nswgf.com`.
+  - Sources: `RomsGames`, `RomsFun`, `RomsLab`, `ArchiveOrg`, `NoPayStation`, `DlpsGame`, and `NswGame`, which subclasses `DlpsGame` for the Switch site `nswgf.com`.
   - The removed `DlArchive` source stopped working when its API started returning 403 (`File listing is not public`). Don't bring it back.
-  - Module singletons `NPS`, `DLP`, `RF` and the `SOURCES` registry sit at about `bin/rom:756`.
-- **Host-link sources** (`DlpsGame`/`NswGame`) only auto-download from mediafire, Google Drive and 1fichier. Most Switch hosts (MegaUp, datanodes, buzzheavier, gofile) sit behind a Cloudflare page, a captcha, or a token that only their own obfuscated JS can produce, so `resolve()` raises an error that includes the links. `--print-url` lists them.
+  - Module singletons `NPS`, `DLP`, `RF` and the `SOURCES` registry sit just after `class NswGame`.
+- **Switch direct paths**. Each was checked with a 16-byte `Range` GET:
+  - `RomsLab.resolve` builds `filekeeper.net/download?op=download2&id=<code>&method_free=Free+download&down_direct=1`. That URL redirects (302) to a signed `edge01.fetchio.cc` link, which `stream()` follows. Resolve it right before streaming, because the signed link expires.
+  - `ArchiveOrg` with arg `"switchindex"` searches filenames in `switchindex.json`. That file is built from an advancedsearch query (`-collection:loggedin`) plus `/metadata/<id>`; items that are restricted or have private files are skipped. `title_kind()` derives Base, Update or DLC from the Title ID suffix (`000`, `800`, other).
+  - `DlpsGame`/`NswGame` auto-download from pixeldrain (`/api/file/<id>?download`), mediafire, Google Drive and 1fichier, tried in that order. MegaUp, datanodes, buzzheavier and gofile sit behind a Cloudflare page, a captcha, or a token that only their own obfuscated JS can produce. For those hosts `resolve()` raises an error that includes the links, and `--print-url` lists them.
+  - RAR files are kept as downloaded and never extracted. `validate()` requires `Rar!\x1a\x07` for files of 50 MiB or less.
 - **`Result`** uses `__slots__`: `source`, `title`, `platform`, `page`, `size`, `meta`.
   - `platform` holds the display **label** (`"PS Vita"`), not the key (`vita`).
   - `meta` is a free-form dict with keys such as `ext`, `kind`, `pk` (the platform key), `pop`, `bytes`, `id`, `filename` and `search_title`.
-- **`search()`** queries every provider in `PLATFORMS[key]` for each query variant and stops at 12 or more hits. With no platform it queries romsgames and romsfun, plus NPS, dlpsgame and nswgame on the first try only. When there are fewer than 6 results it falls back to archive.org.
-- **`rank()`** sorts results with a heuristic score. It boosts Wikipedia best-sellers via `meta["pop"]` and penalizes archive.org, dlpsgame/nswgame, Update/DLC and words in `BAD`.
+- **`search()`** queries every provider in `PLATFORMS[key]` for each query variant and stops at 12 or more hits. With no platform it queries romsgames and romsfun, plus NPS, dlpsgame, nswgame and romslab on the first try only. When there are fewer than 6 results it falls back to archive.org.
+- **`rank()`** sorts results with a heuristic score. It boosts Wikipedia best-sellers via `meta["pop"]` and penalizes archive.org (−8), dlpsgame (−5), nswgame (−12), Update/DLC, and words in `BAD`.
 - **Best-sellers** come from scraped Wikipedia lists (`WIKI_LISTS`) with a hand-written wikitext parser.
 - **TUI**: Textual classes are defined *inside* `run_tui()`, and `textual` is imported there lazily. Work runs in daemon threads that update the UI via `call_from_thread`.
 
@@ -83,10 +87,11 @@ When scripting searches, always pass `--list` or `--print-url`.
   |---|---|---|
   | `nps.json` | 7d | |
   | `switchports.json` | 7d | Bump `PORTS_VER` when the entry shape changes |
+  | `switchindex.json` | 7d | Archive.org Switch files; bump `INDEX_VER` when the entry shape changes |
   | `popular.json` | 30d | |
 
-  `--refresh` rebuilds `nps.json`, `switchports.json` and `popular.json`.
-- **Module-level constants used before their definition**: `PORTS_*` and `POPULAR*` are defined after the `ArchiveOrg` code that uses them. They are read at call time, so never reference them at import time above `WIKI_LISTS`.
+  `--refresh` rebuilds `nps.json`, `switchports.json`, `switchindex.json` and `popular.json`.
+- **Module-level constants used before their definition**: `PORTS_*`, `INDEX_*` and `POPULAR*` are defined after the `ArchiveOrg` code that uses them. They are read at call time, so never reference them at import time above `WIKI_LISTS`.
 
 ### Adding a platform or source
 1. Add the platform to `PLATFORMS` as `key → [(source_name, arg), …]`. Providers are queried in order and their results merged. The first provider that has `all_items` drives browsing; without one, browsing falls back to Wikipedia best-sellers.

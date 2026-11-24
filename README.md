@@ -79,26 +79,37 @@ search queries all of them and merges the results.
   hands out a signed `statics.romsfun.com` link. Covers most retro consoles plus
   PS3/PS4/PS Vita, Wii U, Xbox/360, PC and DOS. RomsFun has no Switch files.
 - **RomsGames**: search + a POST that returns the file (NES … PS2, Sega, arcade).
-- **Switch**: Archive.org (`nsp`/`xci`/`nsz` items, direct download) and
-  nswgame (`nswgf.com`, the Switch sister of dlpsgame). nswgame posts link file
-  hosts (MegaUp, 1fichier, datanodes…) that sit behind Cloudflare/captcha, so
-  `rom` prints those links for you to open in a browser.
-  The old dlarchive source closed its public API (HTTP 403) and was removed.
+- **Switch** — four providers, best first:
+  - **romslab** (`romslab.com`, about 9k Switch posts): the post's "Mirror 2"
+    filekeeper link resolves to a signed CDN URL in a single request. Base games
+    only; updates and DLC sit on captcha-protected datanodes.
+  - **Archive.org file index**: the `.nsp`/`.nsz`/`.xci` files inside public
+    multi-game items, matched by filename. Login-restricted items are skipped.
+    Cached for 7 days in `switchindex.json`; the first Switch search builds it,
+    which takes a minute or two.
+  - **Archive.org item search** for single-game items.
+  - **nswgame** (`nswgf.com`, the Switch sister site of dlpsgame): pixeldrain and
+    mediafire links download directly. The other hosts (MegaUp, datanodes, gofile,
+    buzzheavier…) sit behind Cloudflare or a captcha, so for those `rom` only
+    prints the links.
+  - The old dlarchive source closed its public API (HTTP 403) and was removed.
+- **Archives stay as downloaded**: `.rar`/`.7z`/`.zip` files are not extracted.
+  Extract them yourself (`7z x file.rar`).
 - **Switch ports**: Archive.org scan (`switch port` / `homebrew port` /
   `nsp`+`port`), 7-day cache.
 - **PS3 and PS Vita**: NoPayStation — downloads `.pkg` straight from Sony's CDN
   (`zeus.dl.playstation.net`), no token needed.
 - **PS4 and PS5**: dlpsgame (search via WP REST). The direct download works when
-  the post links a supported host (mediafire, Google Drive, 1fichier); when it
-  doesn't, `rom` shows the links so you can grab the file yourself.
+  the post links a supported host (pixeldrain, mediafire, Google Drive, 1fichier);
+  when it doesn't, `rom` shows the links so you can grab the file yourself.
 - **Best sellers first**: browsing a platform lists the best-selling titles
   (Wikipedia lists, 30-day cache) with ★; picking one searches the providers.
 - **Fallback**: Archive.org on platforms with a thin catalogue.
 - Caches live in `~/.cache/rom-cli/`; `--refresh` refetches them.
 - Ranking is by title match, with a penalty for hacks/translations/betas and a
   preference for `Base` over `Update`/`DLC`.
-- Files are validated before being written (zip, 7z, `PFS0` for `.nsp`, and
-  `PKG`/`CNT` for `.pkg`).
+- Files are validated before being kept: zip, 7z, `Rar!` for `.rar`, `PFS0` for
+  `.nsp`, and `PKG`/`CNT` for `.pkg`.
 - Downloads are resumable (`.part` + `Range`).
 
 ## Remote mode (`rom-remote`)
