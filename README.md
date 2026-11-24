@@ -96,8 +96,9 @@ search queries all of them and merges the results.
     only; updates and DLC sit on captcha-protected datanodes.
   - **Archive.org file index**: the `.nsp`/`.nsz`/`.xci` files inside public
     multi-game items, matched by filename. Login-restricted items are skipped.
-    Cached for 7 days in `switchindex.json`; the first Switch search builds it,
-    which takes a minute or two.
+    Cached in `switchindex.json`. Only the very first Switch search builds it
+    inline (about a minute and a half). Once it is older than 7 days, searches
+    keep using it while a detached background process rebuilds it.
   - **Archive.org item search** for single-game items.
   - **nswgame** (`nswgf.com`, the Switch sister site of dlpsgame): pixeldrain and
     mediafire links download directly. The other hosts (MegaUp, datanodes, gofile,

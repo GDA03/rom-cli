@@ -25,12 +25,13 @@ flowchart LR
 - **Switch direct paths**. Each was checked with a 16-byte `Range` GET:
   - `RomsLab.resolve` builds `filekeeper.net/download?op=download2&id=<code>&method_free=Free+download&down_direct=1`. That URL redirects (302) to a signed `edge01.fetchio.cc` link, which `stream()` follows. Resolve it right before streaming, because the signed link expires.
   - `ArchiveOrg` with arg `"switchindex"` searches filenames in `switchindex.json`. That file is built from an advancedsearch query (`-collection:loggedin`) plus `/metadata/<id>`; items that are restricted or have private files are skipped. `title_kind()` derives Base, Update or DLC from the Title ID suffix (`000`, `800`, other).
+  - **Stale-while-revalidate**: an expired index is still served, and `_refresh_index_bg()` spawns a detached `python -c` child that runs `switch_index(force=True)`. On Windows the child is started with `DETACHED_PROCESS|CREATE_NEW_PROCESS_GROUP`; on POSIX with `start_new_session`. The marker `switchindex.json.refreshing` blocks a second spawn for 15 min. The index is built inline only when the cache is missing, its `ver` changed, or `force` is set (`--refresh`).
   - `DlpsGame`/`NswGame` auto-download from pixeldrain (`/api/file/<id>?download`), mediafire, Google Drive and 1fichier, tried in that order. MegaUp, datanodes, buzzheavier and gofile sit behind a Cloudflare page, a captcha, or a token that only their own obfuscated JS can produce. For those hosts `resolve()` raises an error that includes the links, and `--print-url` lists them.
   - RAR files are kept as downloaded and never extracted. `validate()` requires `Rar!\x1a\x07` for files of 50 MiB or less.
 - **`Result`** uses `__slots__`: `source`, `title`, `platform`, `page`, `size`, `meta`.
   - `platform` holds the display **label** (`"PS Vita"`), not the key (`vita`).
   - `meta` is a free-form dict with keys such as `ext`, `kind`, `pk` (the platform key), `pop`, `bytes`, `id`, `filename` and `search_title`.
-- **`search()`** queries every provider in `PLATFORMS[key]` for each query variant and stops at 12 or more hits. With no platform it queries romsgames and romsfun, plus NPS, dlpsgame, nswgame and romslab on the first try only. When there are fewer than 6 results it falls back to archive.org.
+- **`search()`** queries every provider in `PLATFORMS[key]` for each query variant and stops at 12 or more hits. Within one variant the providers run **concurrently** in a `ThreadPoolExecutor`. `pool.map` keeps results in config order, so ranking is deterministic, and each job's exception is swallowed to `[]`. The variants themselves stay sequential because of the early stop. With no platform it queries romsgames and romsfun, plus NPS, dlpsgame, nswgame and romslab on the first try only. When there are fewer than 6 results it falls back to archive.org.
 - **`rank()`** sorts results with a heuristic score. It boosts Wikipedia best-sellers via `meta["pop"]` and penalizes archive.org (−8), dlpsgame (−5), nswgame (−12), Update/DLC, and words in `BAD`.
 - **Best-sellers** come from scraped Wikipedia lists (`WIKI_LISTS`) with a hand-written wikitext parser.
 - **TUI**: Textual classes are defined *inside* `run_tui()`, and `textual` is imported there lazily. Work runs in daemon threads that update the UI via `call_from_thread`.
@@ -87,7 +88,7 @@ When scripting searches, always pass `--list` or `--print-url`.
   |---|---|---|
   | `nps.json` | 7d | |
   | `switchports.json` | 7d | Bump `PORTS_VER` when the entry shape changes |
-  | `switchindex.json` | 7d | Archive.org Switch files; bump `INDEX_VER` when the entry shape changes |
+  | `switchindex.json` | 7d | Archive.org Switch files. Served stale and refreshed in the background (marker `.refreshing`, 15 min). Bump `INDEX_VER` when the entry shape changes |
   | `popular.json` | 30d | |
 
   `--refresh` rebuilds `nps.json`, `switchports.json`, `switchindex.json` and `popular.json`.
