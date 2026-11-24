@@ -106,6 +106,13 @@ When scripting searches, always pass `--list` or `--print-url`.
   | `popular.json` | 30d | |
 
   `--refresh` rebuilds `nps.json`, `switchports.json`, `switchindex.json` and `popular.json`.
+- **Settings** live in `${XDG_CONFIG_HOME:-~/.config}/rom-cli/config.json`, which holds only `out_dir` today.
+  - Read it with `load_config()`; a missing or invalid file returns `{}`.
+  - Write it with `save_config(**changes)`, which writes a `.tmp` file and then `os.replace`s it.
+  - `set_out_dir()` expands `~` and `%VARS%`, creates the folder, checks it is writable, and saves it.
+  - `OUT_DIR` is resolved at import with this precedence: `-o`, then `$ROM_DIR`, then config, then `~/Downloads/roms`.
+  - The TUI changes the folder through `OutDirScreen` (palette → "Download folder…").
+  - Modal screens that hold an `Input` must `event.stop()` in `on_input_submitted`. Otherwise `Input.Submitted` bubbles to `RomApp.on_input_submitted` and starts a search for the typed text.
 - **Module-level constants used before their definition**: `PORTS_*`, `INDEX_*` and `POPULAR*` are defined after the `ArchiveOrg` code that uses them. They are read at call time, so never reference them at import time above `WIKI_LISTS`.
 
 ### Adding a platform or source

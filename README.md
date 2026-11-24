@@ -99,7 +99,8 @@ the next attempt resumes).
 | `--refresh` | rebuild the catalog index |
 | `--index` | download/print the index and exit |
 | `-n, --number` | how many results to show (default 15) |
-| `-o, --out` | destination folder (default `~/Downloads/roms` or `$ROM_DIR`) |
+| `-o, --out` | destination folder for this run only |
+| `--set-out DIR` | save `DIR` as the default download folder (created if missing) and exit |
 | `-l, --platforms` | list platforms |
 
 Platforms: `switch`, `switchports`, `ps5`, `ps4`, `ps3`, `psv`, `ps2`, `ps1`,
@@ -107,7 +108,15 @@ Platforms: `switch`, `switchports`, `ps5`, `ps4`, `ps3`, `psv`, `ps2`, `ps1`,
 `wii`, `wiiu`, `xbox`, `xbox360`, `genesis`, `mastersystem`, `gamegear`, `segacd`,
 `dreamcast`, `saturn`, `arcade`.
 
-Files go to `~/Downloads/roms/<platform>/`.
+Files go to `<download folder>/<platform>/`. The download folder is picked in
+this order:
+
+1. `-o DIR` for one run.
+2. `$ROM_DIR`.
+3. The saved setting, set with `rom --set-out "D:\Games\roms"` or in the UI
+   (`ctrl+b` → "Download folder…"). It is stored in
+   `~/.config/rom-cli/config.json`, or `$XDG_CONFIG_HOME/rom-cli/config.json`.
+4. `~/Downloads/roms`.
 
 ## How it works
 

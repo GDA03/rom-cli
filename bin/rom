@@ -32,8 +32,43 @@ UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
-OUT_DIR = os.path.expanduser(os.environ.get("ROM_DIR") or "~/Downloads/roms")
 CACHE_DIR = os.path.expanduser(os.environ.get("XDG_CACHE_HOME") or "~/.cache") + "/rom-cli"
+CONFIG_FILE = os.path.join(os.path.expanduser(os.environ.get("XDG_CONFIG_HOME") or "~/.config"),
+                           "rom-cli", "config.json")
+
+
+def load_config():
+    try:
+        with open(CONFIG_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_config(**changes):
+    cfg = load_config()
+    cfg.update(changes)
+    os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
+    tmp = CONFIG_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2)
+    os.replace(tmp, CONFIG_FILE)
+
+
+def set_out_dir(path):
+    """Validate, create and persist the download folder; returns the absolute path."""
+    path = os.path.abspath(os.path.expanduser(os.path.expandvars(path.strip().strip('"'))))
+    os.makedirs(path, exist_ok=True)
+    if not os.access(path, os.W_OK):
+        raise RuntimeError(f"folder is not writable: {path}")
+    save_config(out_dir=path)
+    return path
+
+
+# download folder: -o > $ROM_DIR > config "out_dir" (rom --set-out / TUI options) > ~/Downloads/roms
+OUT_DIR = os.path.expanduser(os.environ.get("ROM_DIR") or load_config().get("out_dir")
+                             or "~/Downloads/roms")
 
 # platform key -> providers tried in order: (source name, source arg)
 PLATFORMS = {
@@ -1739,7 +1774,7 @@ def run_tui(platform_key="", query="", outdir=None, force=False):
     from textual.containers import Vertical, VerticalScroll, Horizontal
     from textual.binding import Binding
 
-    outdir = outdir or OUT_DIR
+    outdir = os.path.expanduser(outdir or OUT_DIR)
 
     class OptionsScreen(ModalScreen):
         CSS = """
@@ -1769,6 +1804,25 @@ def run_tui(platform_key="", query="", outdir=None, force=False):
 
         def action_cancel(self):
             self.dismiss(None)
+
+    class OutDirScreen(OptionsScreen):
+        def __init__(self, current):
+            super().__init__([])
+            self.current = current
+
+        def compose(self) -> ComposeResult:
+            with Vertical(id="opts"):
+                yield Static("Download folder", id="opts-title")
+                yield Input(value=self.current, id="outdir-input")
+                yield Static("Enter save · esc cancel · ~ and %VARS% expand · created if missing",
+                             id="opts-hint")
+
+        def on_mount(self):
+            self.query_one("#outdir-input", Input).focus()
+
+        def on_input_submitted(self, event):
+            event.stop()  # keep it from bubbling to RomApp, which would search for the path
+            self.dismiss(event.value.strip() or None)
 
     PICKER_HEAD = ("switch", "ps4", "ps2", "gba", "nds", "psp")
 
@@ -1800,6 +1854,7 @@ def run_tui(platform_key="", query="", outdir=None, force=False):
             self._filter(event.value)
 
         def on_input_submitted(self, event):
+            event.stop()
             ol = self.query_one(OptionList)
             if ol.highlighted is not None:
                 self.dismiss(ol.get_option_at_index(ol.highlighted).id)
@@ -2171,6 +2226,7 @@ def run_tui(platform_key="", query="", outdir=None, force=False):
                     ("Switch platform", "plat"),
                     ("Select all", "all"),
                     ("Clear selection", "none"),
+                    (f"Download folder… ({self.outdir})", "outdir"),
                 ]),
                 callback=self._palette,
             )
@@ -2193,6 +2249,17 @@ def run_tui(platform_key="", query="", outdir=None, force=False):
                 self.action_select_none()
             elif choice == "plat":
                 self.action_platform()
+            elif choice == "outdir":
+                self.push_screen(OutDirScreen(self.outdir), callback=self._set_outdir)
+
+        def _set_outdir(self, path):
+            if not path:
+                return
+            try:
+                self.outdir = set_out_dir(path)
+                self._set_status(f"✔ downloads now go to {self.outdir} (saved)")
+            except Exception as e:
+                self._set_status(f"✖ {e}")
 
         def on_data_table_row_selected(self, event):
             # DataTable consumes Enter as RowSelected; download just that row, marks untouched
@@ -2322,8 +2389,21 @@ def main():
     ap.add_argument("--refresh", action="store_true", help="ignore the caches and refetch")
     ap.add_argument("--index", action="store_true", help="build/print the caches and exit")
     ap.add_argument("-n", "--number", type=int, default=15, help="how many results to show")
-    ap.add_argument("-o", "--out", default=OUT_DIR, help="destination folder")
+    ap.add_argument("-o", "--out", default=OUT_DIR, help="destination folder (this run only)")
+    ap.add_argument("--set-out", metavar="DIR", help="save DIR as the default download folder and exit")
     args = ap.parse_args()
+
+    if args.set_out is not None:
+        try:
+            if not args.set_out.strip():
+                raise RuntimeError("--set-out needs a folder path")
+            path = set_out_dir(args.set_out)
+        except Exception as e:
+            write(f"  ✖ {e}")
+            return 1
+        write(f"  ✔ downloads will go to {path}")
+        write(f"  saved in {CONFIG_FILE}")
+        return 0
 
     if args.platforms:
         write("  platforms: " + ", ".join(sorted(PLATFORMS)))
@@ -2371,7 +2451,7 @@ def main():
     query = " ".join(args.query)
 
     if not query:
-        run_tui(key, "", args.out, args.refresh)
+        run_tui(key, "", os.path.expanduser(args.out), args.refresh)
         return 0
 
     status(f"searching for '{query}'…")
