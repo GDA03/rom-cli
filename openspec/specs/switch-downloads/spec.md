@@ -37,7 +37,7 @@ Downloading a romslab result SHALL fetch the base-game file through the post's f
 - **THEN** the download fails with a message that lists the post's host links
 
 ### Requirement: Archive.org Switch file index
-`rom` SHALL search the Switch package files (`.nsp`, `.nsz`, `.xci`) inside public multi-game Archive.org items by filename. It SHALL cache that index for 7 days. When the cached index is older than that, `rom` SHALL search the cached index and refresh it in the background instead of rebuilding it inline.
+`rom` SHALL search the Switch package files (`.nsp`, `.nsz`, `.xci`) of public Archive.org items, including packages stored inside `.zip` archives. It SHALL cover software and data items and items named by a Switch Title ID. It SHALL cache the index for 7 days, and when the cache is older it SHALL search the cached index and refresh it in the background instead of rebuilding inline.
 
 #### Scenario: Game inside a multi-game item
 - **WHEN** the user runs `rom --list -p switch "hollow knight"`
@@ -58,6 +58,14 @@ Downloading a romslab result SHALL fetch the base-game file through the post's f
 #### Scenario: Refresh already running
 - **WHEN** a background refresh started less than 15 minutes ago and another Switch search runs on an expired index
 - **THEN** no second refresh is started
+
+#### Scenario: Package inside a zip in a data item named by Title ID
+- **WHEN** the user runs `rom --list -p switch "hyrule warriors definitive edition"` and the game exists only as `[0100AE00096EA000].zip` in the data item `0100-ae-00096-ea-000`
+- **THEN** the results include Hyrule Warriors: Definitive Edition from archive.org with its `.xci` base and `Update 1.0.1` as choices
+
+#### Scenario: Downloading a zip member
+- **WHEN** the user downloads the update choice of that result
+- **THEN** only the `(Update 1.0.1).nsp` member is downloaded, not the whole 13.9 GB zip
 
 ### Requirement: Restricted Archive.org items are excluded
 The Archive.org Switch index SHALL exclude items that need an account (`loggedin` collection, `access-restricted-item`, or private files).
@@ -97,3 +105,10 @@ When no linked host of a result can be fetched directly, the download SHALL fail
 #### Scenario: Only captcha hosts
 - **WHEN** the user downloads an nswgame result that only links captcha or Cloudflare-protected hosts
 - **THEN** the command reports the failure and prints up to four of the links to open in a browser
+
+### Requirement: Non-Switch Archive.org hits are excluded
+Archive.org item-search results on the Switch platform SHALL be dropped when the item has no Switch package or archive, or when its title marks it as a PC port or recompilation.
+
+#### Scenario: PC recompilation
+- **WHEN** a Switch search matches the item "Hyrule Warriors: Definitive Edition (Nintendo Switch) – Recompilación para PC", which only holds a `.7z` PC build
+- **THEN** that item is not shown as a Switch result
