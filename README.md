@@ -133,7 +133,8 @@ search queries all of them and merges the results.
     only; updates and DLC sit on captcha-protected datanodes.
   - **Archive.org file index**: the `.nsp`/`.nsz`/`.xci` files of public
     software and data items, including the ones packed inside `.zip` archives
-    (each package inside a zip downloads on its own, without the whole zip).
+    (each package inside a zip is extracted from the zip with ranged reads, so
+    only that package's bytes are downloaded, never the whole zip).
     Items named only by a Title ID (`0100-ae-00096-ea-000`) are covered too:
     when the words of a search don't match, `rom` takes the game's Title ID from
     the other providers' results and looks it up. Login-restricted items are
