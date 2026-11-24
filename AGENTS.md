@@ -24,7 +24,10 @@ flowchart LR
   - Module singletons `NPS`, `DLP`, `RF` and the `SOURCES` registry sit just after `class NswGame`.
 - **Switch direct paths**. Each was checked with a 16-byte `Range` GET:
   - `RomsLab.resolve` builds `filekeeper.net/download?op=download2&id=<code>&method_free=Free+download&down_direct=1`. That URL redirects (302) to a signed `edge01.fetchio.cc` link, which `stream()` follows. Resolve it right before streaming, because the signed link expires.
-  - `ArchiveOrg` with arg `"switchindex"` searches filenames in `switchindex.json`. That file is built from an advancedsearch query (`-collection:loggedin`) plus `/metadata/<id>`; items that are restricted or have private files are skipped. `title_kind()` derives Base, Update or DLC from the Title ID suffix (`000`, `800`, other).
+  - `ArchiveOrg` with arg `"switchindex"` searches `switchindex.json`. The file is built from `index_query`: software or data items, `identifier:0100*`, `-collection:loggedin`, at least 300 MB. That gives about 730 items, each read through `/metadata/<id>`; items that are restricted or have private files are skipped. Entries are `{id, name, size, title}`, plus `zip` and `path` for packages inside a zip. `_zip_members()` parses the zip listing page `/download/<id>/<zip>/`. A zip is opened only when its name has a Title ID, the item id starts with `0100-`, or the item has no loose package. Members whose name lacks a Title ID take the folder's or zip's TID (+`800` for "Update"). `_url(e)` builds `/download/<id>/<zip>/<path>` for members. `title_kind()` derives Base, Update or DLC from the Title ID suffix (`000`, `800`, other).
+  - Titles: `_entry_title()` prefers the filename, then the item title. A Title-ID-only entry copies the title of a sibling with the same base TID.
+  - Title-ID fallback: `switch_tid_fallback()` runs at the end of a `switch` `search()`. It acts only when no TID group matched every query word. It collects TIDs from result titles, pages and filenames; if there are none, it reads the top matching nswgame post's links (one extra request). It then calls `index_results(query, tids=…)`.
+  - `ArchiveOrg.search(…, "switch")` drops titles matching `NON_SWITCH_RE` (pc, recomp*, windows, android, port), unless the title names nsp, xci or nsz.
   - **Stale-while-revalidate**: an expired index is still served, and `_refresh_index_bg()` spawns a detached `python -c` child that runs `switch_index(force=True)`. On Windows the child is started with `DETACHED_PROCESS|CREATE_NEW_PROCESS_GROUP`; on POSIX with `start_new_session`. The marker `switchindex.json.refreshing` blocks a second spawn for 15 min. The index is built inline only when the cache is missing, its `ver` changed, or `force` is set (`--refresh`).
   - `DlpsGame`/`NswGame` auto-download from pixeldrain (`/api/file/<id>?download`), mediafire, Google Drive and 1fichier, tried in that order. MegaUp, datanodes, buzzheavier and gofile sit behind a Cloudflare page, a captcha, or a token that only their own obfuscated JS can produce. For those hosts `resolve()` raises an error that includes the links, and `--print-url` lists them.
   - RAR files are kept as downloaded and never extracted. `validate()` requires `Rar!\x1a\x07` for files of 50 MiB or less.
@@ -99,7 +102,7 @@ When scripting searches, always pass `--list` or `--print-url`.
   |---|---|---|
   | `nps.json` | 7d | |
   | `switchports.json` | 7d | Bump `PORTS_VER` when the entry shape changes |
-  | `switchindex.json` | 7d | Archive.org Switch files. Served stale and refreshed in the background (marker `.refreshing`, 15 min). Bump `INDEX_VER` when the entry shape changes |
+  | `switchindex.json` | 7d | Archive.org Switch files (`ver` 2: entries add title/zip/path). Served stale and refreshed in the background (marker `.refreshing`, 15 min). Bump `INDEX_VER` when the entry shape changes |
   | `popular.json` | 30d | |
 
   `--refresh` rebuilds `nps.json`, `switchports.json`, `switchindex.json` and `popular.json`.

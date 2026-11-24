@@ -526,9 +526,35 @@ class ArchiveOrg:
         "saturn": ("Saturn", ["cue", "bin", "chd", "zip"]), "arcade": ("Arcade", ["zip"]),
         "switch": ("switch OR nsp OR xci OR nsz", ["nsp", "xci", "nsz", "7z", "zip", "rar"]),
     }
-    index_query = ("mediatype:software AND -collection:loggedin AND "
-                   "(subject:(nsp OR nsz OR xci OR switch) OR title:(nsp OR nsz OR xci OR switch)) "
-                   "AND files_count:[3 TO *] AND item_size:[500000000 TO *]")
+    # software OR data items, plus items named by a dashed Title ID (0100-ae-...); see widen-archive-switch-index
+    index_query = ("(mediatype:software OR mediatype:data) AND -collection:loggedin AND "
+                   "(subject:(nsp OR nsz OR xci OR switch) OR title:(nsp OR nsz OR xci OR switch) "
+                   "OR identifier:0100*) AND files_count:[1 TO *] AND item_size:[300000000 TO *]")
+    PKG_RE = re.compile(r"(?i)\.(nsp|nsz|xci)$")
+    NON_SWITCH_RE = re.compile(r"(?i)\b(pc|recomp\w*|recompilaci\w*|windows|android|port)\b")
+
+    def _zip_members(self, ident, zname):
+        """[(member path, size)] of the Switch packages inside an Archive.org zip, via its listing page."""
+        st, _, body = request(f"{self.base}/download/{ident}/{urllib.parse.quote(zname)}/", retries=2,
+                              timeout=60)
+        if st != 200:
+            return []
+        out = []
+        for href, size in re.findall(r'<a href="//archive\.org/download/[^"]+?\.zip/([^"]+)">'
+                                     r'.*?<td id="size">(\d*)', body.decode("utf-8", "replace"), re.S):
+            path = urllib.parse.unquote(htmllib.unescape(href))
+            if self.PKG_RE.search(path):
+                out.append((path, int(size or 0)))
+        return out
+
+    @staticmethod
+    def _entry_title(fn, item_title):
+        stem = re.sub(r"\.[A-Za-z0-9]{2,4}$", "", fn)
+        t = pretty_title(re.sub(r"\[[^\]]*\]|\([^)]*\)", " ", stem)).strip(" +-_.")
+        if re.search(r"[A-Za-z]{3}", t):
+            return t
+        it = clean(item_title or "")
+        return it if re.search(r"[A-Za-z]{3}", re.sub(r"0100[0-9A-Fa-f]{12}", "", it)) else ""
 
     def _refresh_index_bg(self):
         # serve the stale index now; rebuild it in a detached process that outlives this CLI run
@@ -562,7 +588,7 @@ class ArchiveOrg:
             except Exception:
                 pass
         url = (f"{self.base}/advancedsearch.php?q={urllib.parse.quote(self.index_query)}"
-               "&fl%5B%5D=identifier&sort%5B%5D=item_size+desc&rows=500&output=json")
+               "&fl%5B%5D=identifier&sort%5B%5D=item_size+desc&rows=1000&output=json")
         st, _, body = request(url, retries=2, timeout=60)
         if st != 200:
             raise RuntimeError(f"archive.org search failed ({st})")
@@ -583,16 +609,49 @@ class ArchiveOrg:
                 if on_progress:
                     on_progress(done[0], len(idents))
             files = data.get("files") or []
-            if (data.get("metadata") or {}).get("access-restricted-item") or any(
-                    f.get("private") for f in files):
+            meta = data.get("metadata") or {}
+            if meta.get("access-restricted-item") or any(f.get("private") for f in files):
                 return []
-            return [{"id": ident, "name": f["name"], "size": int(f.get("size") or 0)}
-                    for f in files if re.search(r"(?i)\.(nsp|nsz|xci)$", f["name"])]
+            item_title = meta.get("title") if isinstance(meta.get("title"), str) else ""
+            out = [{"id": ident, "name": f["name"], "size": int(f.get("size") or 0),
+                    "title": self._entry_title(os.path.basename(f["name"]), item_title)}
+                   for f in files if self.PKG_RE.search(f["name"])]
+            zips = [f["name"] for f in files if f["name"].lower().endswith(".zip")]
+            for zn in zips:
+                # open zips that look like Switch dumps: TID in the name or a TID-named item; in items
+                # without loose packages only when the item is a small game pack (ponytail: 30-zip cap
+                # keeps ~2k-zip ROM packs of other consoles out; raise it if a real Switch pack is missed)
+                if not (TID_RE.search(zn) or ident.startswith("0100-") or (not out and len(zips) <= 30)):
+                    continue
+                try:
+                    members = self._zip_members(ident, zn)
+                except Exception:
+                    members = []
+                for p, sz in members:
+                    name = os.path.basename(p)
+                    tid = TID_RE.search(p) or TID_RE.search(zn)
+                    if tid and not TID_RE.search(name):
+                        # the folder/zip names the game; mark updates so grouping and kind still work
+                        t = tid.group(1)
+                        t = (t[:-3] + "800") if kind_of(name) == "Update" else t
+                        name = f"{os.path.splitext(name)[0]} [{t}]{os.path.splitext(name)[1]}"
+                    out.append({"id": ident, "name": name, "size": sz, "zip": zn, "path": p,
+                                "title": self._entry_title(os.path.basename(p), item_title)})
+            return out
 
         with ThreadPoolExecutor(max_workers=6) as pool:
             items = [e for batch in pool.map(work, idents) for e in batch]
         if not items:
             raise RuntimeError("archive.org Switch index is empty")
+        named = {}  # base TID -> a human title, to name TID-only files of the same game
+        for e in items:
+            m = TID_RE.search(e["name"])
+            if m and e["title"]:
+                named.setdefault(base_tid(m.group(1)), e["title"])
+        for e in items:
+            m = TID_RE.search(e["name"])
+            if not e["title"] and m:
+                e["title"] = named.get(base_tid(m.group(1)), "")
         try:
             os.makedirs(CACHE_DIR, exist_ok=True)
             tmp = INDEX_FILE + ".tmp"
@@ -604,25 +663,33 @@ class ArchiveOrg:
         INDEX_CACHE = items
         return items
 
-    def index_results(self, query, force=False, on_progress=None):
+    def index_results(self, query, force=False, on_progress=None, tids=()):
         toks = significant(norm(query).split())
+        tids = set(tids)
         groups, singles = {}, []
         for e in self.switch_index(force=force, on_progress=on_progress):
             fn = os.path.basename(e["name"])
-            title = pretty_title(re.sub(r"\([^)]*\)", " ", fn))
-            if not (toks and all(t in norm(title) for t in toks)):
-                continue
+            title = e.get("title") or pretty_title(re.sub(r"\([^)]*\)", " ", fn))
             m = TID_RE.search(fn)
-            if m:
-                groups.setdefault(base_tid(m.group(1)), []).append((e, fn, title))
+            btid = base_tid(m.group(1)) if m else None
+            if not ((toks and all(t in norm(title) for t in toks)) or (btid and btid in tids)):
+                continue
+            if btid:
+                groups.setdefault(btid, []).append((e, fn, title))
             else:
                 singles.append(self._file_result(e, fn, title))
         out = [self._group_result(tid, files) for tid, files in groups.items()]
         return out + singles
 
+    def _url(self, e):
+        if e.get("zip"):  # a member served from inside the zip
+            return (f"{self.base}/download/{e['id']}/{urllib.parse.quote(e['zip'])}/"
+                    f"{urllib.parse.quote(e['path'])}")
+        return f"{self.base}/download/{e['id']}/{urllib.parse.quote(e['name'])}"
+
     def _file_result(self, e, fn, title):
         return Result(self.name, title, PLATFORM_LABELS["switch"],
-                      f"{self.base}/download/{e['id']}/{urllib.parse.quote(e['name'])}",
+                      self._url(e),
                       human(e["size"]),
                       meta={"pk": "switch", "ext": fn.rsplit(".", 1)[-1].lower(),
                             "kind": title_kind(fn), "bytes": e["size"], "filename": fn})
@@ -634,8 +701,8 @@ class ArchiveOrg:
         choices = []
         for e, fn, _t in files:
             kind = title_kind(fn)
-            choices.append({"label": choice_label(fn, kind), "kind": kind, "direct": True,
-                            "url": f"{self.base}/download/{e['id']}/{urllib.parse.quote(e['name'])}",
+            choices.append({"label": choice_label(fn, kind) + (" · in zip" if e.get("zip") else ""),
+                            "kind": kind, "direct": True, "url": self._url(e),
                             "filename": fn, "size": human(e["size"]), "bytes": e["size"]})
         bases = [i for i, c in enumerate(choices) if c["kind"] == "Base"]
         ups = [i for i, c in enumerate(choices) if c["kind"] == "Update"]
@@ -648,7 +715,8 @@ class ArchiveOrg:
         for i in default:
             choices[i]["default"] = True
         head = choices[default[0]] if default else choices[0]
-        title = pretty_title(re.sub(r"\[[^\]]*\]|\([^)]*\)", " ", head["filename"])).rstrip(" +-_")
+        named = next((t for _e, _fn, t in files if t), "")
+        title = named or pretty_title(re.sub(r"\[[^\]]*\]|\([^)]*\)", " ", head["filename"])).rstrip(" +-_")
         n_up = len(ups)
         n_dlc = sum(c["kind"] == "DLC" for c in choices)
         summary = " · ".join(x for x in (f"+{n_up} upd" if n_up else "",
@@ -770,6 +838,10 @@ class ArchiveOrg:
         out = []
         for doc in docs:
             title = clean(doc.get("title") or "")
+            # Switch: drop PC ports / recompilations unless the title names a package format
+            if (platform_key == "switch" and self.NON_SWITCH_RE.search(title)
+                    and not re.search(r"(?i)\b(nsp|xci|nsz)\b", title)):
+                continue
             if title:
                 out.append(Result(self.name, title, PLATFORM_LABELS.get(platform_key, platform_key),
                                   f"{self.base}/details/{doc['identifier']}", meta={"exts": exts}))
@@ -1150,6 +1222,8 @@ def search(query, platform_key=None, on_progress=None, force=False):
             pass
         results = [r for r in results if r.kind == "Port"]
         seen = {(r.source, r.title, r.size) for r in results}
+    if platform_key == "switch":
+        add(switch_tid_fallback(query, results))
     if (platform_key and len(results) < 6 and platform_key in ArchiveOrg.tags
             and ("archive.org", platform_key) not in PLATFORMS[platform_key]):
         try:
@@ -1158,6 +1232,39 @@ def search(query, platform_key=None, on_progress=None, force=False):
             pass
     annotate_popular(results)
     return results
+
+
+def switch_tid_fallback(query, results):
+    """When no Title-ID group matched the query's words, find the game's Title IDs elsewhere
+    (result titles/pages, else the top nswgame post's links) and look those up in the index."""
+    toks = significant(norm(query).split())
+    if any(r.meta.get("tid") and all(t in norm(r.title) for t in toks) for r in results):
+        return []
+    named = {}  # base TID -> the provider title it came from, to name TID-only index groups
+    for r in results:
+        for m in TID_RE.findall(" ".join([r.title, r.page or "", r.meta.get("filename") or ""])):
+            named.setdefault(base_tid(m), r.title)
+    if not named:
+        nsw = next((r for r in rank(list(results), query)
+                    if r.source == "nswgame" and all(t in norm(r.title) for t in toks)), None)
+        if nsw is not None:
+            try:
+                for u in SOURCES["nswgame"].links(nsw.page):
+                    for m in TID_RE.findall(u):
+                        named.setdefault(base_tid(m), nsw.title)
+            except Exception:
+                pass
+    if not named:
+        return []
+    try:
+        found = [r for r in SOURCES["archive.org"].index_results(query, tids=set(named))
+                 if r.meta.get("tid") in named]
+    except Exception:
+        return []
+    for r in found:
+        if not re.search(r"[A-Za-z]{3}", re.sub(r"0100[0-9A-Fa-f]{12}|\.\w+$", "", r.title)):
+            r.title = named[r.meta["tid"]]  # e.g. "[0100AE00096EA000].xci" -> nswgame's title
+    return found
 
 
 def fmt_row(r, i):
@@ -1325,6 +1432,7 @@ def expand_choices(result):
         if not c.get("direct"):
             continue
         m = dict(result.meta, url=c["url"], filename=c.get("filename"), kind=c["kind"],
+                 bytes=c.get("bytes") or 0,
                  ext=(c.get("filename") or "").rsplit(".", 1)[-1].lower() or result.meta.get("ext"))
         m.pop("choices", None)
         m.pop("picked", None)
@@ -1361,6 +1469,7 @@ def download(result, outdir, on_progress=None, cancel=None):
     def cb(read, total):
         if not on_progress:
             return
+        total = total or result.meta.get("bytes") or 0  # zip members come without Content-Length
         pct = read * 100 / total if total else 0
         bps = read / max(time.time() - start, 0.1)
         on_progress(read, total, f"{pct:5.1f}%  {human(read)}/{human(total)}  "
@@ -1422,7 +1531,7 @@ PORTS_VER = 2
 PORTS_CACHE = None
 INDEX_FILE = os.path.join(CACHE_DIR, "switchindex.json")
 INDEX_TTL = 7 * 86400
-INDEX_VER = 1
+INDEX_VER = 2  # entries carry title/zip/path (widen-archive-switch-index)
 INDEX_CACHE = None
 POPULAR = None
 POPULAR_NORM = None

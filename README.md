@@ -122,12 +122,18 @@ search queries all of them and merges the results.
   - **romslab** (`romslab.com`, about 9k Switch posts): the post's "Mirror 2"
     filekeeper link resolves to a signed CDN URL in a single request. Base games
     only; updates and DLC sit on captcha-protected datanodes.
-  - **Archive.org file index**: the `.nsp`/`.nsz`/`.xci` files inside public
-    multi-game items, matched by filename. Login-restricted items are skipped.
-    Cached in `switchindex.json`. Only the very first Switch search builds it
-    inline (about a minute and a half). Once it is older than 7 days, searches
-    keep using it while a detached background process rebuilds it.
-  - **Archive.org item search** for single-game items.
+  - **Archive.org file index**: the `.nsp`/`.nsz`/`.xci` files of public
+    software and data items, including the ones packed inside `.zip` archives
+    (each package inside a zip downloads on its own, without the whole zip).
+    Items named only by a Title ID (`0100-ae-00096-ea-000`) are covered too:
+    when the words of a search don't match, `rom` takes the game's Title ID from
+    the other providers' results and looks it up. Login-restricted items are
+    skipped. Cached in `switchindex.json`. The first Switch search builds it
+    inline (several minutes: about 730 items plus their Switch zips; once more
+    after upgrading, since the cache format changed). Once it is older than 7
+    days, searches keep using it while a detached background process rebuilds it.
+  - **Archive.org item search** for single-game items. PC ports and
+    recompilations are not shown as Switch results.
   - **nswgame** (`nswgf.com`, the Switch sister site of dlpsgame): pixeldrain and
     mediafire links download directly. The other hosts (MegaUp, datanodes, gofile,
     buzzheavier…) sit behind Cloudflare or a captcha, so for those `rom` only
