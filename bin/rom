@@ -277,6 +277,7 @@ PLATFORM_RE = re.compile(r"^/([a-z0-9\-]+?)-rom-")
 
 class RomsGames:
     name = "romsgames"
+    direct = True
     base = "https://www.romsgames.net"
 
     def search(self, query, prefixes=None):
@@ -337,6 +338,7 @@ class RomsGames:
 
 class RomsFun:
     name = "romsfun"
+    direct = True
     base = "https://romsfun.com"
     # ponytail: hardcoded WP `console` term ids; re-read /wp-json/wp/v2/console if romsfun renumbers.
     consoles = {
@@ -400,6 +402,7 @@ class RomsFun:
 
 class RomsLab:
     name = "romslab"
+    direct = True
     base = "https://romslab.com"
 
     def search(self, query, pk=None):
@@ -441,6 +444,7 @@ class RomsLab:
 
 class ArchiveOrg:
     name = "archive.org"
+    direct = True
     base = "https://archive.org"
     tags = {
         "nes": ("NES", ["nes", "zip"]), "snes": ("SNES", ["sfc", "smc", "zip"]),
@@ -693,6 +697,7 @@ class ArchiveOrg:
 
 class NoPayStation:
     name = "nps"
+    direct = True
     base = "https://nopaystation.com/tsv/"
     tsv = {"ps3": "PS3_GAMES.tsv", "psv": "PSV_GAMES.tsv",
            "psp": "PSP_GAMES.tsv", "ps1": "PSX_GAMES.tsv"}
@@ -785,6 +790,7 @@ class NoPayStation:
 
 class DlpsGame:
     name = "dlpsgame"
+    direct = False  # host links; only pixeldrain/mediafire/gdrive/1fichier resolve
     base = "https://dlpsgame.com"
     keys = ("ps5", "ps4", "ps3")
     ext = "pkg"
@@ -1407,21 +1413,14 @@ def pop_rank(pk, title):
     m = _pop_norm(pk)
     if not m:
         return None
-    if nt in m:
-        return m[nt]
-    best = None
-    for wt, i in m.items():
-        if nt.startswith(wt + " "):
-            if best is None or i < best:
-                best = i
-    return best
+    return m.get(nt)
 
 
 def annotate_popular(results):
     load_popular()
     for r in results:
         pk = r.meta.get("pk") or LABEL_KEY.get(r.platform)
-        if not pk:
+        if not pk or any(b in r.title.lower() for b in BAD):
             continue
         rk = pop_rank(pk, r.title)
         if rk is not None:
@@ -1452,7 +1451,7 @@ def browse_items(platform_key):
         def key(r):
             kind = KIND_ORDER.get(r.kind, 1)
             size = -int(r.meta.get("bytes") or 0)
-            rk = pop_rank(pk, r.title)
+            rk = None if any(b in r.title.lower() for b in BAD) else pop_rank(pk, r.title)
             if rk is not None:
                 r.meta["pop"] = rk
                 return (0, rk, kind, size, norm(r.title))
@@ -1505,7 +1504,7 @@ def run_tui(platform_key="", query="", outdir=None, force=False):
         def compose(self) -> ComposeResult:
             with Vertical(id="opts"):
                 yield Static("Platform", id="opts-title")
-                opts = [("todas", "all")] + [(PLATFORM_LABELS[k], k) for k in sorted(PLATFORM_LABELS)]
+                opts = [("All", "all")] + [(PLATFORM_LABELS[k], k) for k in sorted(PLATFORM_LABELS)]
                 yield OptionList(*[Option(t, id=i) for t, i in opts], id="opts-list")
                 yield Static("↑↓ move · Enter choose · esc close", id="opts-hint")
 
@@ -1513,20 +1512,21 @@ def run_tui(platform_key="", query="", outdir=None, force=False):
         TITLE = "rom"
         CSS = """
         Input { dock: top; }
-        #status { height: 3; background: $surface; padding: 0 1; dock: bottom; }
+        #status { height: 1; background: $surface; padding: 0 1; }
         Footer { dock: bottom; }
         DataTable { height: 1fr; }
         """
         BINDINGS = [
-            ("q", "quit", "Quit"),
-            ("d", "download", "Download"),
-            ("space", "toggle", "Select"),
-            ("p", "platform", "Platform"),
-            ("n", "next_page", "Page+"),
-            ("b", "prev_page", "Page-"),
-            ("ctrl+b", "palette", "Options"),
-            ("ctrl+a", "select_all", "Select all"),
-            ("ctrl+n", "select_none", "Clear"),
+            Binding("d", "download", "Download"),
+            Binding("space", "toggle", "Mark"),
+            Binding("slash", "focus_search", "Search"),
+            Binding("p", "platform", "Platform"),
+            Binding("n", "next_page", "Page+"),
+            Binding("b", "prev_page", "Page-"),
+            Binding("ctrl+b", "palette", "Options"),
+            Binding("ctrl+a", "select_all", "Mark all", show=False),
+            Binding("ctrl+n", "select_none", "Clear", show=False),
+            Binding("q", "quit", "Quit"),
         ]
 
         def __init__(self, platform_key, query, outdir, force):
@@ -1545,13 +1545,11 @@ def run_tui(platform_key="", query="", outdir=None, force=False):
             yield Header(show_clock=True)
             yield Input(placeholder="Type the game name and press Enter…  (p switches platform)")
             yield DataTable(cursor_type="row")
-            yield Footer()
             yield Static("", id="status")
+            yield Footer()
 
         def on_mount(self):
-            table = self.query_one(DataTable)
-            table.add_columns(" ", "Title", "Platform", "Type", "Size", "Source")
-            self.col_keys = list(table.columns.keys())
+            self.col_keys = []
             self._busy = None
             self._frame = 0
             self.set_interval(0.1, self._tick)
@@ -1570,16 +1568,14 @@ def run_tui(platform_key="", query="", outdir=None, force=False):
                 return
             frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
             self._frame += 1
-            self.query_one(Static).update(f"{frames[self._frame % len(frames)]} {self._busy}")
+            self.query_one("#status", Static).update(f"{frames[self._frame % len(frames)]} {self._busy}")
 
         def _hint(self):
-            plat = PLATFORM_LABELS.get(self.pk, "todas") if self.pk else "todas"
-            return (f"platform: {plat} · space mark · d download · p browse/switch · "
-                    f"n/b page · ctrl+b options · q quit")
+            return "platform: " + (PLATFORM_LABELS.get(self.pk, self.pk) if self.pk else "All")
 
         def _set_status(self, msg):
             self._busy = None
-            self.query_one(Static).update(msg)
+            self.query_one("#status", Static).update(msg)
 
         def _busy_msg(self, msg):
             self._busy = msg
@@ -1593,7 +1589,7 @@ def run_tui(platform_key="", query="", outdir=None, force=False):
             self.last_query = q
             self.selected.clear()
             self._busy = f"searching for '{q}'…"
-            self.query_one(Static).update(f"⠋ searching for '{q}'…")
+            self.query_one("#status", Static).update(f"⠋ searching for '{q}'…")
             threading.Thread(target=self._search_bg, args=(q,), daemon=True).start()
 
         def _search_bg(self, q):
@@ -1609,20 +1605,34 @@ def run_tui(platform_key="", query="", outdir=None, force=False):
 
         def _show(self, results):
             self.browse_items = None
-            table = self.query_one(DataTable)
-            table.clear()
             self.results = results
-            for i, r in enumerate(results[:200]):
+            self._fill(results[:200])
+            if not results:
+                msg = "nothing found"
+            elif len(results) > 200:
+                msg = f"200 of {len(results)} results"
+            else:
+                msg = f"{len(results)} results"
+            self._set_status(f"{msg} · {self._hint()}")
+
+        def _fill(self, rows):
+            # rebuild columns per render: drop Type/Size when no shown row has a value
+            table = self.query_one(DataTable)
+            table.clear(columns=True)
+            cols = [" ", "Title", "Platform"]
+            self.show_type = any(r.kind for r in rows)
+            self.show_size = any(r.size for r in rows)
+            cols += ["Type"] * self.show_type + ["Size"] * self.show_size + ["Source"]
+            self.col_keys = table.add_columns(*cols)
+            for i, r in enumerate(rows):
                 table.add_row(*self._cells(i, r), key=str(i))
             table.focus()
-            msg = f"{len(results)} results" if results else "nothing found"
-            self._set_status(f"{msg} — {self._hint()}")
 
         def _start_browse(self, pk):
             self.last_query = ""
             self.selected.clear()
             self._busy = f"opening {PLATFORM_LABELS.get(pk, pk)}…"
-            self.query_one(Static).update(f"⠋ {self._busy}")
+            self.query_one("#status", Static).update(f"⠋ {self._busy}")
             threading.Thread(target=self._browse_bg, args=(pk,), daemon=True).start()
 
         def _browse_bg(self, pk):
@@ -1644,14 +1654,8 @@ def run_tui(platform_key="", query="", outdir=None, force=False):
             chunk = items[self.page * size:(self.page + 1) * size]
             self.results = chunk
             self.selected.clear()
-            table = self.query_one(DataTable)
-            table.clear()
-            for i, r in enumerate(chunk):
-                table.add_row(*self._cells(i, r), key=str(i))
-            table.focus()
-            plat = PLATFORM_LABELS.get(self.pk, self.pk or "todas")
-            self._set_status(f"{plat} · {len(items)} items · page {self.page + 1}/{pages}"
-                             " — n/b page · space mark · d download · q quit")
+            self._fill(chunk)
+            self._set_status(f"{self._hint()} · {len(items)} items · page {self.page + 1}/{pages}")
 
         def action_next_page(self):
             if self.browse_items is None:
@@ -1668,15 +1672,20 @@ def run_tui(platform_key="", query="", outdir=None, force=False):
         def _cells(self, i, r):
             from rich.text import Text as RT
             sel = i in self.selected
-            mark = RT("  ✔  ", style="black on green") if sel else ""
-            style = "black on dark_green" if sel else None
+            src = SOURCES.get(r.source)
+            if src is None:  # best-seller placeholder: judge by the platform's first provider
+                src = SOURCES.get((PLATFORMS.get(r.meta.get("pk")) or [("",)])[0][0])
+            arrow = "↗" if src is not None and not getattr(src, "direct", True) else "↓"
+            mark = RT(f"{'✔' if sel else ' '} {arrow}", style="bold green" if sel else "dim")
             star = "★ " if r.meta.get("pop") is not None else ""
-            vals = [mark, star + r.title[:60], r.platform, r.kind or "-",
-                    r.size or "?", r.source]
-            out = [mark]
-            for v in vals[1:]:
-                out.append(RT(str(v), style=style) if style else str(v))
-            return out
+            vals = [star + r.title[:60], r.platform]
+            if self.show_type:
+                vals.append(r.kind or "-")
+            if self.show_size:
+                vals.append(r.size or "?")
+            vals.append(r.source or "")
+            style = "bold on #1f3d2b" if sel else None
+            return [mark] + [RT(str(v), style=style) if style else str(v) for v in vals]
 
         def _redraw(self):
             table = self.query_one(DataTable)
@@ -1688,8 +1697,8 @@ def run_tui(platform_key="", query="", outdir=None, force=False):
             n = len(self.selected)
             msg = f"{len(self.results)} results"
             if n:
-                msg += f" · ✔ {n} selected"
-            self._set_status(msg + " — " + self._hint())
+                msg += f" · ✔ {n} marked"
+            self._set_status(f"{msg} · {self._hint()}")
 
         def action_toggle(self):
             table = self.query_one(DataTable)
@@ -1713,17 +1722,21 @@ def run_tui(platform_key="", query="", outdir=None, force=False):
         def action_platform(self):
             self._open_platforms()
 
+        def action_focus_search(self):
+            self.query_one(Input).focus()
+
         def _open_platforms(self):
             def chosen(val):
                 if val is None:
                     return
                 self.pk = "" if val == "all" else val
-                if self.last_query:
-                    self._start_search(self.last_query)
+                q = self.query_one(Input).value.strip()
+                if q:
+                    self._start_search(q)
                 elif self.pk:
                     self._start_browse(self.pk)
                 else:
-                    self._set_status("platform: all — type a name and press Enter")
+                    self._set_status("platform: All · type a name and press Enter")
             self.push_screen(PlataformasScreen([]), callback=chosen)
 
         def action_palette(self):
@@ -1759,11 +1772,8 @@ def run_tui(platform_key="", query="", outdir=None, force=False):
                 self.action_platform()
 
         def on_data_table_row_selected(self, event):
-            table = self.query_one(DataTable)
-            if table.cursor_row is not None and self.results:
-                self.selected.add(table.cursor_row)
-                self._redraw()
-                self.action_palette()
+            # DataTable consumes Enter as RowSelected; download just that row, marks untouched
+            self.action_download()
 
         def action_download(self):
             table = self.query_one(DataTable)

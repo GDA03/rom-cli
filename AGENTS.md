@@ -35,6 +35,11 @@ flowchart LR
 - **`rank()`** sorts results with a heuristic score. It boosts Wikipedia best-sellers via `meta["pop"]` and penalizes archive.org (−8), dlpsgame (−5), nswgame (−12), Update/DLC, and words in `BAD`.
 - **Best-sellers** come from scraped Wikipedia lists (`WIKI_LISTS`) with a hand-written wikitext parser.
 - **TUI**: Textual classes are defined *inside* `run_tui()`, and `textual` is imported there lazily. Work runs in daemon threads that update the UI via `call_from_thread`.
+  - Key hints come from `Binding(..., show=True)` in the Footer. `#status` is a one-line Static docked above the Footer and is queried by id (`query_one("#status", Static)`), never by type.
+  - The DataTable consumes Enter as `RowSelected`, so `on_data_table_row_selected` triggers the download. An `enter` app binding would never fire.
+  - `_fill()` rebuilds the columns on every render: Type and Size appear only when some shown row has a value.
+  - `_cells()` shows `↓`/`↗` from each source's `direct` class attribute. For best-seller placeholders (`source == ""`) it looks at the platform's first provider.
+  - ★ means `pop_rank()` matched the title exactly and the title has no `BAD` word. The same `meta["pop"]` drives the ranking boost in `rank()`.
 
 ## Key Directories
 - `bin/`: everything that ships.

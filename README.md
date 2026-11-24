@@ -58,9 +58,15 @@ that platform's whole catalog (pages of 300, `n`/`b` to move) — so you can
 browse without typing anything. Typing in the field and pressing `Enter` goes
 back to searching.
 
-In the UI: `↑↓` navigate, `space` mark, `d` download (the marked ones or the
-current one), `p` switch platform, `n`/`b` page, `ctrl+b` options palette,
-`ctrl+a` select all, `ctrl+n` clear, `q` quit.
+In the UI: `↑↓` navigate, `Enter` or `d` download the highlighted row, `space`
+mark, `ctrl+b` options palette ("Download selected" downloads the marked rows),
+`/` jump to the search field, `p` pick a platform (it browses the catalog when
+the search field is empty, otherwise it searches there), `n`/`b` page, `ctrl+a`
+mark all, `ctrl+n` clear marks, `q` quit. The footer lists the keys.
+
+Row markers: `↓` downloads directly, `↗` gives host links to open in a browser,
+`★` is an exact match for a Wikipedia best-seller (hacks never get it). The Type
+and Size columns only appear when at least one row has a value.
 
 | Flag | Description |
 |------|-------------|
